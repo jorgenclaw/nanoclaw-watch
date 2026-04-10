@@ -69,13 +69,17 @@
 
 // --- Quick-tap preset prompts (4 max, displayed on home screen) ---
 // Tapping a preset POSTs that text to /api/watch/message.
-// NOTE: Index 3 is special — it's the manual "Sleep" button (handled in
-// onQuickPromptPressed before quickPromptText is called). The text below
-// is vestigial; the slot is reserved for the screen-off action.
+// Special slots (intercepted in onQuickPromptPressed before quickPromptText):
+//   Slot 1 (top-right)    = Clock sub-screen entry (no text POST)
+//   Slot 2 (bottom-left)  = Steps button (live pedometer count, tap-twice to reset)
+//   Slot 3 (bottom-right) = regular text prompt — used to be Sleep, but Sleep
+//                           moved to its own pinned bottom-edge button.
+// Slots 1 and 2 don't actually need a prompt string but the macros below
+// stay defined so quickPromptText() compiles for all 4 indices.
 #define QUICK_PROMPT_1  "What's next for me today?"
-#define QUICK_PROMPT_2  "Any new messages?"
-#define QUICK_PROMPT_3  "Workshop status?"
-#define QUICK_PROMPT_4  "(unused — slot 4 is the Sleep button)"
+#define QUICK_PROMPT_2  "(unused — slot 2 is the Clock sub-screen entry)"
+#define QUICK_PROMPT_3  "(unused — slot 3 is the Steps button)"
+#define QUICK_PROMPT_4  "Any new messages?"
 
 // --- Display ---
 #define BRIGHTNESS_ACTIVE  200  // 0-255, screen brightness when awake

@@ -12,6 +12,7 @@ enum WatchState {
     STATE_RECORDING,   // capturing voice (mic active, "Listening..." screen)
     STATE_SENDING,     // POST in flight ("Sending..." screen)
     STATE_RESPONSE,    // displaying agent response ("Reply" screen)
+    STATE_CLOCK,       // clock sub-screen (alarm/timer/stopwatch — stubbed)
     STATE_ERROR        // generic error display
 };
 

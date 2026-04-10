@@ -28,10 +28,15 @@
 static char g_replyBuf[4096];
 static uint32_t g_lastPollMs = 0;
 static bool g_powerKeyPressed = false;
-// Set to true by onSpeakButtonPressed() when the user taps the speak button
-// *during* an active recording. The recording loop in doVoiceCapture() polls
-// this flag and breaks out when it flips true.
+// Set to true by the recording loop's direct touch poll (or as a fallback
+// by onSpeakButtonPressed via the LVGL CLICK path) when the user taps the
+// SEND zone of the speak button while recording. doVoiceCapture() breaks
+// out and proceeds to RMS gate + attenuate + POST.
 static volatile bool g_stopRecording = false;
+// Set to true by the recording loop's direct touch poll when the user taps
+// the CANCEL zone (left 40%) of the speak button. doVoiceCapture() breaks
+// out, frees the audio buffer, and returns to home WITHOUT POSTing.
+static volatile bool g_cancelRecording = false;
 
 // Forward declarations of work routines
 static void doVoiceCapture();
@@ -88,32 +93,58 @@ void onSpeakButtonPressed() {
 
 void onQuickPromptPressed(int idx) {
     if (currentState() != STATE_HOME) return;
-    // Quick-button index 3 is repurposed as a manual "Sleep" button — it
-    // dims the display and puts the watch into light sleep immediately
-    // instead of POSTing a text prompt to the host. The T-Watch S3 has no
-    // dedicated screen-off button (only one physical control, the side
-    // power key, which we already use for the same purpose), so this gives
-    // Scott a touchscreen-accessible sleep affordance.
-    if (idx == 3) {
-        Serial.println("[ui] manual sleep button pressed");
+    // Quick-button index 1 is the Clock entry — opens a sub-screen with
+    // alarm/timer/stopwatch buttons (currently stubbed). The sub-screen has
+    // its own Close button (top-right) that returns to home.
+    if (idx == 1) {
+        Serial.println("[ui] clock button pressed — opening sub-screen");
         instance.vibrator();
-        // CRITICAL: wait for the user's finger to leave the screen before
-        // entering light sleep. WAKEUP_SRC_TOUCH_PANEL fires on any active
-        // touch — if we sleep while the finger is still down, the panel
-        // wakes the chip back up within milliseconds. Poll the touch chip
-        // until it reports 0 points (or 3 sec safety timeout).
-        int16_t tx = 0, ty = 0;
-        uint32_t wait_start = millis();
-        while (instance.getPoint(&tx, &ty, 1) > 0 &&
-               millis() - wait_start < 3000) {
-            delay(10);
-        }
-        delay(150);  // extra debounce so the touch IRQ has settled
-        Serial.println("[ui] finger released, entering sleep");
-        enterLightSleep();
+        setState(STATE_CLOCK);
+        ui_showClock();
         return;
     }
+    // Quick-button index 2 is the Steps button — shows live pedometer count
+    // and resets the counter via tap-twice-to-confirm. First tap arms the
+    // confirm overlay (label flips to amber "Tap to confirm" for 3 sec); the
+    // second tap actually resets the BMA423 pedometer. Either way the user
+    // gets a haptic buzz on the tap that's recognized.
+    if (idx == 2) {
+        Serial.println("[ui] steps button tapped");
+        instance.vibrator();
+        if (ui_handleStepsTap()) {
+            // Confirming second tap — perform the reset and refresh.
+            Serial.println("[ui] steps reset confirmed");
+            instance.sensor.resetPedometer();
+            ui_refreshSteps();
+        }
+        return;
+    }
+    // Slots 0 and 3 are regular text prompts — POST the configured prompt
+    // text to the host as a watch message.
     doQuickPrompt(idx);
+}
+
+// Dedicated callback for the pinned bottom-edge Sleep button. Used to live
+// in onQuickPromptPressed as the idx==3 special case, but Sleep moved out of
+// the grid (slot 3 reverted to a regular prompt) and got its own widget.
+void onSleepButtonPressed() {
+    if (currentState() != STATE_HOME) return;
+    Serial.println("[ui] sleep button pressed");
+    instance.vibrator();
+    // CRITICAL: wait for the user's finger to leave the screen before
+    // entering light sleep. WAKEUP_SRC_TOUCH_PANEL fires on any active
+    // touch — if we sleep while the finger is still down, the panel
+    // wakes the chip back up within milliseconds. Poll the touch chip
+    // until it reports 0 points (or 3 sec safety timeout).
+    int16_t tx = 0, ty = 0;
+    uint32_t wait_start = millis();
+    while (instance.getPoint(&tx, &ty, 1) > 0 &&
+           millis() - wait_start < 3000) {
+        delay(10);
+    }
+    delay(150);  // extra debounce so the touch IRQ has settled
+    Serial.println("[ui] finger released, entering sleep");
+    enterLightSleep();
 }
 
 void onResponseDismissed() {
@@ -219,9 +250,11 @@ static void doVoiceCapture() {
         return;
     }
 
-    // Stream-read I2S samples into the buffer. Polls g_stopRecording every
-    // chunk so a second button tap stops the recording immediately.
+    // Stream-read I2S samples into the buffer. Polls g_stopRecording AND
+    // g_cancelRecording every chunk so a second button tap (cancel or
+    // send zone) breaks the loop immediately.
     g_stopRecording = false;
+    g_cancelRecording = false;
     uint8_t* data_ptr = wav_buffer + 44;
     uint32_t bytes_recorded = 0;
     uint32_t start_ms = millis();
@@ -251,13 +284,27 @@ static void doVoiceCapture() {
             bytes_recorded += got;
         }
 
-        // Direct touch poll — primary stop-tap detection.
+        // Direct touch poll — primary cancel/stop-tap detection. Hit-test
+        // the touch coordinate against the speak button zones:
+        //   ui_speakBtnHitTest returns -1 outside, 0 cancel, 1 send.
+        // Touches OUTSIDE the speak button (e.g. on a quick-task button or
+        // the sleep button) are deliberately ignored during recording so
+        // the user can't accidentally interrupt themselves by brushing the
+        // wrong widget.
         int16_t tx = 0, ty = 0;
         bool is_touched = instance.getPoint(&tx, &ty, 1) > 0;
         if (is_touched && !was_touched) {
-            Serial.printf("[voice] direct touch detected at %d,%d — stopping\n",
-                          tx, ty);
-            g_stopRecording = true;
+            int hit = ui_speakBtnHitTest(tx, ty);
+            if (hit == 0) {
+                Serial.printf("[voice] CANCEL tap at %d,%d\n", tx, ty);
+                g_cancelRecording = true;
+            } else if (hit == 1) {
+                Serial.printf("[voice] SEND tap at %d,%d\n", tx, ty);
+                g_stopRecording = true;
+            } else {
+                Serial.printf("[voice] touch at %d,%d outside speak btn — ignored\n",
+                              tx, ty);
+            }
         }
         was_touched = is_touched;
 
@@ -276,6 +323,10 @@ static void doVoiceCapture() {
         // Pump LVGL too (in case a slower tap is caught by the CLICKED path)
         // and give FreeRTOS a tick.
         lv_task_handler();
+        if (g_cancelRecording) {
+            Serial.println("[voice] cancel-tap flag set — breaking out");
+            break;
+        }
         if (g_stopRecording) {
             Serial.println("[voice] stop-tap flag set — breaking out");
             break;
@@ -285,6 +336,33 @@ static void doVoiceCapture() {
     uint32_t duration_ms = millis() - start_ms;
     Serial.printf("[voice] recording finished: %u bytes in %u ms\n",
                   (unsigned)bytes_recorded, (unsigned)duration_ms);
+
+    // Cancel path: user tapped the left zone of the split speak button.
+    // Free the buffer, give a confirmation buzz, return to home with no
+    // POST and no agent run. Must come BEFORE the empty-buffer check so
+    // an instant cancel (sub-chunk capture) doesn't show "Mic failed".
+    if (g_cancelRecording) {
+        Serial.println("[voice] CANCELLED — discarding buffer");
+        free(wav_buffer);
+        instance.vibrator();
+        // CRITICAL: wait for finger release AND clear LVGL's pending touch
+        // state before returning home. Without this, the same tap that
+        // triggered the cancel produces a queued LVGL CLICKED event on
+        // release, which fires after we set STATE_HOME and immediately
+        // starts a NEW recording — the user sees the timer "reset to
+        // 0:00" instead of returning to the blue idle button.
+        int16_t tx = 0, ty = 0;
+        uint32_t wait_start = millis();
+        while (instance.getPoint(&tx, &ty, 1) > 0 &&
+               millis() - wait_start < 3000) {
+            delay(10);
+        }
+        delay(120);
+        lv_indev_reset(NULL, NULL);  // discard any queued LVGL touch events
+        setState(STATE_HOME);
+        ui_showHome();
+        return;
+    }
 
     if (bytes_recorded == 0) {
         Serial.println("[voice] ERROR: no bytes captured");
@@ -401,15 +479,20 @@ static void configureMotionWake() {
 
 static void enterLightSleep() {
     Serial.println("[main] entering light sleep");
-    // NOTE: LilyGoLib's lightSleep() already calls powerControl(BACKLIGHT,
-    // false) + sleepDisplay() internally, so we don't need a separate
-    // setBrightness(0) call.
+    // WAKEUP_SRC_SENSOR is deliberately OMITTED. We tried re-enabling it
+    // for tilt-to-wake on 2026-04-10 and confirmed via serial trace that
+    // the BMA423 fires its sensor wakeup IRQ within milliseconds of
+    // entering sleep — same-second wake-up, screen never visibly dims,
+    // user perceives "sleep doesn't work". The simple "just turn it on"
+    // approach does NOT work no matter how we filter the events on the
+    // wake side.
     //
-    // WAKEUP_SRC_SENSOR is deliberately OMITTED. The BMA423 accelerometer
-    // wake-on-motion fires on ambient vibrations (typing nearby, watch
-    // sitting on a vibrating surface), which would otherwise wake the watch
-    // milliseconds after it sleeps — making it look like the screen never
-    // dims. Wake on power key or touch panel only.
+    // The path forward for tilt-to-wake (filed in project memory) is to
+    // use BMA423's dedicated BMA4_WRIST_WEAR_WAKE_UP interrupt (a different
+    // sensor feature than generic motion wakeup), which fires only on a
+    // deliberate wrist-raise gesture instead of any vibration. That
+    // requires investigating the LilyGo SensorBMA423 wrapper API to find
+    // the right enable call. Until then, wake on power key + touch only.
     instance.lightSleep((WakeupSource_t)(WAKEUP_SRC_POWER_KEY |
                                          WAKEUP_SRC_TOUCH_PANEL));
     Serial.println("[main] woke from light sleep");
@@ -476,10 +559,34 @@ void loop() {
         enterLightSleep();
     }
 
-    // Idle -> light sleep
+    // Diagnostic: print idle progress every 5 sec while in HOME state.
+    // Lets us catch the case where the idle timer is being constantly
+    // reset by something we don't expect (touch panel phantom touches,
+    // sensor IRQs, etc.) — the printed value should monotonically grow
+    // until it hits IDLE_SLEEP_MS and the watch sleeps.
+    static uint32_t s_lastIdleDebug = 0;
+    if (currentState() == STATE_HOME && millis() - s_lastIdleDebug > 5000) {
+        s_lastIdleDebug = millis();
+        Serial.printf("[idle] %lu ms idle (threshold %lu ms)\n",
+                      (unsigned long)(millis() - lastInteractionMs()),
+                      (unsigned long)IDLE_SLEEP_MS);
+    }
+
+    // Idle -> light sleep, with two suppressions:
+    //  1. A timer is currently counting down. Light sleep would still wake
+    //     correctly via touch/power, but the haptic+audio fire pattern at
+    //     0:00 wouldn't play until the next wake — possibly minutes late.
+    //     Stay awake so the fire pattern lands at the right second.
+    //  2. An alarm is enabled and within the next 60 minutes. Same reason —
+    //     alarms can't fire from light sleep on this hardware (no wake
+    //     workaround that doesn't strobe the screen). Trade-off: "alarm
+    //     reliably fires" costs ~1 hour of watch awake-time before each
+    //     alarm. Documented in project memory.
     if (currentState() == STATE_HOME &&
         millis() - lastInteractionMs() > IDLE_SLEEP_MS) {
-        enterLightSleep();
+        if (!ui_timerIsRunning() && !ui_alarmIsImminent(60)) {
+            enterLightSleep();
+        }
     }
 
     delay(5);

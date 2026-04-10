@@ -29,6 +29,23 @@ void ui_setRecordingElapsed(uint32_t seconds);
 // new value without waiting for the 30-sec update_battery tick.
 void ui_refreshSteps();
 
+// Forward decl — full struct in network.h
+struct WeatherData;
+
+// Cache new weather data and refresh both the home button label and the
+// weather sub-screen contents (if visible). Marks weather as valid.
+void ui_setWeatherData(const WeatherData& data);
+// Mark weather as currently fetching (button shows "Weather...").
+void ui_setWeatherPending();
+// Mark the last fetch as failed (button shows "--F UV--").
+void ui_setWeatherFailed();
+// Mark the last fetch as failed and surface a short error code on the
+// button label so the user can see WHY (e.g. "no WiFi", "HTTP 0",
+// "parse fail"). Also stored for the sub-screen status line.
+void ui_setWeatherError(const char* err_code);
+// Open the Weather sub-screen.
+void ui_showWeather();
+
 // Tap-twice-to-confirm pattern for the Steps button. Returns true on the
 // confirming SECOND tap (caller should perform the actual reset). Returns
 // false on the first tap (just arms the visual confirm overlay) or when

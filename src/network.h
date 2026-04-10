@@ -24,3 +24,30 @@ bool net_pollForResponse(char* reply_buf, size_t reply_buf_size);
 
 // NTP time sync (call after WiFi connects)
 void net_syncTime();
+
+// Weather data fetched from wttr.in. All values populated together by
+// net_fetchWeather() — both imperial and metric so unit toggles don't
+// require a refetch. Strings are short and null-terminated.
+struct WeatherData {
+    int  temp_f;
+    int  temp_c;
+    int  uv_index;
+    int  wind_mph;
+    int  wind_kph;
+    char wind_dir[8];           // "N", "NW", "ESE", etc.
+    int  today_max_f;
+    int  today_max_c;
+    int  tomorrow_max_f;
+    int  tomorrow_max_c;
+    int  tonight_min_f;          // = weather[1].mintempF (the coming morning low)
+    int  tonight_min_c;          // = weather[1].mintempC
+    char sunrise[12];            // "06:32 AM"
+    char sunset[12];             // "07:48 PM"
+};
+
+// Fetch current weather from wttr.in for the location in WEATHER_LOCATION
+// (configured in config.h). Populates `out` on success. Returns true on
+// success, false on network failure or parse failure. Writes a short
+// human-readable failure reason into `err_buf` on failure (e.g. "no WiFi",
+// "HTTP 0", "parse fail"). Blocks for up to ~15 seconds.
+bool net_fetchWeather(WeatherData* out, char* err_buf, size_t err_buf_size);

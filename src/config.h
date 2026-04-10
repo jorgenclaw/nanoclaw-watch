@@ -91,3 +91,11 @@
 
 // --- NTP sync ---
 #define NTP_SERVER         "pool.ntp.org"
+
+// --- Weather ---
+// Location string passed to wttr.in. Use "City,State" or "City,Country" or
+// a postal code. URL-safe characters only — no spaces (use "+" if needed).
+#define WEATHER_LOCATION   "Manteca,CA"
+// How often the weather button auto-refreshes in the background. Tapping
+// the button always forces a fresh fetch regardless.
+#define WEATHER_REFRESH_MS 1800000  // 30 minutes

@@ -2,6 +2,7 @@
 #include "config.h"
 #include "state.h"
 #include "network.h"
+#include "settings.h"
 
 #include <LilyGoLib.h>
 #include <LV_Helper.h>
@@ -27,6 +28,7 @@ static lv_obj_t* lbl_date         = nullptr;
 static lv_obj_t* lbl_battery      = nullptr;
 static lv_obj_t* lbl_wifi         = nullptr;
 static lv_obj_t* lbl_steps        = nullptr;  // inner label of quick_btns[2] (Steps button)
+static lv_obj_t* lbl_weather      = nullptr;  // inner label of quick_btns[3] (Weather button)
 static lv_obj_t* speak_btn        = nullptr;
 static lv_obj_t* speak_lbl        = nullptr;  // the label *inside* the speak button — primary indicator
 static lv_obj_t* cancel_lbl       = nullptr;  // left-half "X Cancel" label, only visible during recording
@@ -36,6 +38,30 @@ static lv_obj_t* sleep_btn        = nullptr;  // pinned bottom-edge full-width S
 
 // Clock sub-screen (loaded when user taps the Clock quick button — slot 1).
 static lv_obj_t* clock_screen     = nullptr;
+
+// Weather sub-screen (loaded when user taps the Weather quick button — slot 3).
+static lv_obj_t* weather_screen   = nullptr;
+static lv_obj_t* w_temp_lbl       = nullptr;  // big "57F" / "14C"
+static lv_obj_t* w_today_lbl      = nullptr;  // "Today      72F"
+static lv_obj_t* w_tomorrow_lbl   = nullptr;  // "Tomorrow   70F"
+static lv_obj_t* w_tonight_lbl    = nullptr;  // "Tonight    48F"
+static lv_obj_t* w_uv_wind_lbl    = nullptr;  // "UV 3   Wind 8 mph NW"
+static lv_obj_t* w_sun_lbl        = nullptr;  // "Sunrise 6:32  Sunset 7:48"
+static lv_obj_t* w_unit_btn_lbl   = nullptr;  // "F" or "C" inside the toggle btn
+
+// Weather data cache + render forward decls (definitions are further down
+// near ui_setWeatherData).  Hoisted here so the sub-screen builders and
+// callbacks (which sit between the static state block and the weather data
+// helpers) can reference them without breaking C++ name lookup.
+static WeatherData g_weatherData = {};
+static bool g_weatherValid = false;
+// Last fetch error code (or empty if last fetch succeeded). Surfaced on
+// the home button label and the weather sub-screen status line so the
+// user can see WHY a fetch failed without needing serial.
+static char g_weatherErr[16] = {0};
+static lv_obj_t* w_status_lbl = nullptr;  // status line at bottom of sub-screen
+static void w_render_subscreen();
+static void update_weather_button_label();
 
 // ===== Clock sub-feature state (alarm / timer / stopwatch) =====
 // State lives here in ui.cpp because it's tightly coupled to the LVGL
@@ -89,7 +115,7 @@ static const char* QUICK_LABELS[4] = {
     "Today?",
     "Clock",          // index 1 — opens the clock sub-screen
     "0 steps",        // index 2 — live BMA423 pedometer count, tap-twice to reset
-    "Messages?",      // index 3 — regular text prompt (Sleep moved to its own pinned button)
+    "Weather...",     // index 3 — wttr.in fetch, refreshes on tap (initial pending)
 };
 
 // --- Event callbacks ---
@@ -246,6 +272,12 @@ static void build_home_screen() {
         // main.cpp::onQuickPromptPressed (which calls resetPedometer).
         if (i == 2) {
             lbl_steps = lbl;
+        }
+        // Slot 3 (bottom-right) is the Weather button. Stash its label so
+        // ui_setWeather() can update the temp/UV display when the network
+        // fetch returns.
+        if (i == 3) {
+            lbl_weather = lbl;
         }
     }
 
@@ -832,6 +864,227 @@ static void build_alarm_screen() {
     lv_obj_align(al_status_lbl, LV_ALIGN_CENTER, 0, 100);
 }
 
+// --- Weather sub-screen ---
+//
+// Layout (240×240):
+//   Title row: "Weather"            [Close]
+//   Big current temp                  (font 36)
+//   Today      72F                    (font 14)
+//   Tomorrow   70F
+//   Tonight    48F                    (= weather[1].mintempF, the coming morning low)
+//   UV 3   Wind 8 mph NW              (font 14)
+//   Sunrise 6:32  Sunset 7:48         (font 12)
+//   [F]    [   Refresh   ]            (bottom row)
+//
+// All temperature/wind labels redraw via w_render_subscreen() which reads
+// g_weatherData and the current settings_isMetric() flag, so flipping
+// units instantly redraws without needing a re-fetch.
+
+// Forward decl — defined in main.cpp; lets the Refresh button trigger a
+// fetch without ui.cpp depending directly on net_fetchWeather.
+extern void doWeatherFetchTriggered();
+
+static void w_close_cb(lv_event_t* e) {
+    if (lv_event_get_code(e) != LV_EVENT_CLICKED) return;
+    touchInteraction();
+    setState(STATE_HOME);
+    ui_showHome();
+}
+
+static void w_refresh_cb(lv_event_t* e) {
+    if (lv_event_get_code(e) != LV_EVENT_CLICKED) return;
+    touchInteraction();
+    instance.vibrator();
+    Serial.println("[ui] weather refresh tapped");
+    doWeatherFetchTriggered();
+}
+
+static void w_unit_toggle_cb(lv_event_t* e) {
+    if (lv_event_get_code(e) != LV_EVENT_CLICKED) return;
+    touchInteraction();
+    bool new_metric = !settings_isMetric();
+    settings_setMetric(new_metric);
+    Serial.printf("[ui] unit toggled to %s\n", new_metric ? "metric" : "imperial");
+    // Re-render everything so temps + wind + button labels reflect the new unit.
+    update_weather_button_label();
+    w_render_subscreen();
+    lv_refr_now(NULL);
+}
+
+// Refresh all weather sub-screen labels from g_weatherData using the
+// current unit setting. Safe to call even when the screen isn't showing —
+// it just updates the cached label widgets and they'll be correct when
+// the screen is loaded next.
+static void w_render_subscreen() {
+    if (!w_temp_lbl) return;  // sub-screen not built yet
+    bool metric = settings_isMetric();
+    char buf[40];
+
+    if (g_weatherValid) {
+        // Big current temp
+        snprintf(buf, sizeof(buf), "%d%c",
+                 metric ? g_weatherData.temp_c : g_weatherData.temp_f,
+                 metric ? 'C' : 'F');
+        lv_label_set_text(w_temp_lbl, buf);
+
+        // Today / Tomorrow / Tonight rows — left-aligned label, right
+        // value. snprintf with explicit padding via "%-10s" gives a
+        // pseudo-table look in the monospace-ish Montserrat 14.
+        snprintf(buf, sizeof(buf), "Today      %d%c",
+                 metric ? g_weatherData.today_max_c : g_weatherData.today_max_f,
+                 metric ? 'C' : 'F');
+        lv_label_set_text(w_today_lbl, buf);
+
+        snprintf(buf, sizeof(buf), "Tomorrow   %d%c",
+                 metric ? g_weatherData.tomorrow_max_c : g_weatherData.tomorrow_max_f,
+                 metric ? 'C' : 'F');
+        lv_label_set_text(w_tomorrow_lbl, buf);
+
+        snprintf(buf, sizeof(buf), "Tonight    %d%c",
+                 metric ? g_weatherData.tonight_min_c : g_weatherData.tonight_min_f,
+                 metric ? 'C' : 'F');
+        lv_label_set_text(w_tonight_lbl, buf);
+
+        // UV + wind line
+        snprintf(buf, sizeof(buf), "UV %d   Wind %d %s %s",
+                 g_weatherData.uv_index,
+                 metric ? g_weatherData.wind_kph : g_weatherData.wind_mph,
+                 metric ? "kph" : "mph",
+                 g_weatherData.wind_dir);
+        lv_label_set_text(w_uv_wind_lbl, buf);
+
+        // Sunrise / sunset line — wttr.in returns these as already-formatted
+        // 12-hour strings ("06:32 AM" / "07:48 PM"), so we just concatenate.
+        snprintf(buf, sizeof(buf), "Sunrise %s  Sunset %s",
+                 g_weatherData.sunrise, g_weatherData.sunset);
+        lv_label_set_text(w_sun_lbl, buf);
+    } else {
+        // No valid data yet (pending or failed) — show placeholders.
+        lv_label_set_text(w_temp_lbl,     metric ? "--C" : "--F");
+        lv_label_set_text(w_today_lbl,    "Today      --");
+        lv_label_set_text(w_tomorrow_lbl, "Tomorrow   --");
+        lv_label_set_text(w_tonight_lbl,  "Tonight    --");
+        lv_label_set_text(w_uv_wind_lbl,  "UV --   Wind --");
+        lv_label_set_text(w_sun_lbl,      "Sunrise --:--  Sunset --:--");
+    }
+
+    // Unit toggle button label always shows the CURRENT unit.
+    if (w_unit_btn_lbl) {
+        lv_label_set_text(w_unit_btn_lbl, metric ? "C" : "F");
+    }
+
+    // Status line: success or last error reason.
+    if (w_status_lbl) {
+        if (g_weatherValid) {
+            lv_label_set_text(w_status_lbl, "OK");
+        } else if (g_weatherErr[0]) {
+            char sbuf[40];
+            snprintf(sbuf, sizeof(sbuf), "Last fetch: %s", g_weatherErr);
+            lv_label_set_text(w_status_lbl, sbuf);
+        } else {
+            lv_label_set_text(w_status_lbl, "no fetch yet");
+        }
+    }
+
+    if (weather_screen) {
+        lv_obj_invalidate(weather_screen);
+    }
+}
+
+static void build_weather_screen() {
+    weather_screen = lv_obj_create(NULL);
+    lv_obj_set_style_bg_color(weather_screen, lv_color_hex(0x000000), 0);
+    lv_obj_set_style_text_color(weather_screen, lv_color_hex(0xE8E8E8), 0);
+    lv_obj_clear_flag(weather_screen, LV_OBJ_FLAG_SCROLLABLE);
+
+    make_title(weather_screen, "Weather");
+    make_close_btn(weather_screen, w_close_cb);
+
+    // Big current-temperature display, font 36, centered horizontally.
+    w_temp_lbl = lv_label_create(weather_screen);
+    lv_label_set_text(w_temp_lbl, "--F");
+    lv_obj_set_style_text_font(w_temp_lbl, &lv_font_montserrat_36, 0);
+    lv_obj_align(w_temp_lbl, LV_ALIGN_TOP_MID, 0, 38);
+
+    // Three forecast rows — top-left aligned with small left margin so the
+    // text feels like a list, not centered floats.
+    w_today_lbl = lv_label_create(weather_screen);
+    lv_label_set_text(w_today_lbl, "Today      --");
+    lv_obj_set_style_text_font(w_today_lbl, &lv_font_montserrat_14, 0);
+    lv_obj_align(w_today_lbl, LV_ALIGN_TOP_LEFT, 22, 90);
+
+    w_tomorrow_lbl = lv_label_create(weather_screen);
+    lv_label_set_text(w_tomorrow_lbl, "Tomorrow   --");
+    lv_obj_set_style_text_font(w_tomorrow_lbl, &lv_font_montserrat_14, 0);
+    lv_obj_align(w_tomorrow_lbl, LV_ALIGN_TOP_LEFT, 22, 108);
+
+    w_tonight_lbl = lv_label_create(weather_screen);
+    lv_label_set_text(w_tonight_lbl, "Tonight    --");
+    lv_obj_set_style_text_font(w_tonight_lbl, &lv_font_montserrat_14, 0);
+    lv_obj_align(w_tonight_lbl, LV_ALIGN_TOP_LEFT, 22, 126);
+
+    // UV + wind line, slightly smaller font to fit more.
+    w_uv_wind_lbl = lv_label_create(weather_screen);
+    lv_label_set_text(w_uv_wind_lbl, "UV --   Wind --");
+    lv_obj_set_style_text_font(w_uv_wind_lbl, &lv_font_montserrat_14, 0);
+    lv_obj_align(w_uv_wind_lbl, LV_ALIGN_TOP_MID, 0, 148);
+
+    // Sunrise / sunset line, smaller still.
+    w_sun_lbl = lv_label_create(weather_screen);
+    lv_label_set_text(w_sun_lbl, "Sunrise --:--  Sunset --:--");
+    lv_obj_set_style_text_font(w_sun_lbl, &lv_font_montserrat_12, 0);
+    lv_obj_set_style_text_color(w_sun_lbl, lv_color_hex(0xAAAAAA), 0);
+    lv_obj_align(w_sun_lbl, LV_ALIGN_TOP_MID, 0, 168);
+
+    // Status line — right above the buttons. Shows "OK" on success or
+    // the failure reason on failure ("HTTP 0", "no WiFi", "parse fail").
+    // Tiny and dim — diagnostic data, not chrome.
+    w_status_lbl = lv_label_create(weather_screen);
+    lv_label_set_text(w_status_lbl, "");
+    lv_obj_set_style_text_font(w_status_lbl, &lv_font_montserrat_10, 0);
+    lv_obj_set_style_text_color(w_status_lbl, lv_color_hex(0x888888), 0);
+    lv_obj_align(w_status_lbl, LV_ALIGN_TOP_MID, 0, 184);
+
+    // Bottom row: F/C unit toggle + Refresh button.
+    // Small toggle on the left, wider Refresh on the right.
+    lv_obj_t* unit_btn = lv_obj_create(weather_screen);
+    lv_obj_remove_style_all(unit_btn);
+    lv_obj_set_size(unit_btn, 44, 32);
+    lv_obj_align(unit_btn, LV_ALIGN_BOTTOM_LEFT, 12, -8);
+    lv_obj_set_style_bg_opa(unit_btn, LV_OPA_COVER, 0);
+    lv_obj_set_style_bg_color(unit_btn, lv_color_hex(0x444444), 0);
+    lv_obj_set_style_radius(unit_btn, 8, 0);
+    lv_obj_add_flag(unit_btn, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_clear_flag(unit_btn, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_event_cb(unit_btn, w_unit_toggle_cb, LV_EVENT_CLICKED, NULL);
+    w_unit_btn_lbl = lv_label_create(unit_btn);
+    lv_label_set_text(w_unit_btn_lbl, "F");
+    lv_obj_set_style_text_font(w_unit_btn_lbl, &lv_font_montserrat_18, 0);
+    lv_obj_set_style_text_color(w_unit_btn_lbl, lv_color_hex(0xFFFFFF), 0);
+    lv_obj_center(w_unit_btn_lbl);
+
+    lv_obj_t* refresh_btn = lv_obj_create(weather_screen);
+    lv_obj_remove_style_all(refresh_btn);
+    lv_obj_set_size(refresh_btn, 140, 32);
+    lv_obj_align(refresh_btn, LV_ALIGN_BOTTOM_RIGHT, -12, -8);
+    lv_obj_set_style_bg_opa(refresh_btn, LV_OPA_COVER, 0);
+    lv_obj_set_style_bg_color(refresh_btn, lv_color_hex(0x22C55E), 0);
+    lv_obj_set_style_radius(refresh_btn, 10, 0);
+    lv_obj_add_flag(refresh_btn, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_clear_flag(refresh_btn, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_event_cb(refresh_btn, w_refresh_cb, LV_EVENT_CLICKED, NULL);
+    lv_obj_t* refresh_lbl = lv_label_create(refresh_btn);
+    lv_label_set_text(refresh_lbl, "Refresh");
+    lv_obj_set_style_text_font(refresh_lbl, &lv_font_montserrat_18, 0);
+    lv_obj_set_style_text_color(refresh_lbl, lv_color_hex(0xFFFFFF), 0);
+    lv_obj_center(refresh_lbl);
+}
+
+void ui_showWeather() {
+    w_render_subscreen();  // ensure labels reflect current data + units
+    lv_screen_load(weather_screen);
+}
+
 // --- Public API ---
 
 void ui_init() {
@@ -841,6 +1094,7 @@ void ui_init() {
     build_stopwatch_screen();
     build_timer_screen();
     build_alarm_screen();
+    build_weather_screen();
     lv_screen_load(home_screen);
 }
 
@@ -1047,6 +1301,63 @@ int ui_speakBtnHitTest(int x, int y) {
         return 0;
     }
     return 1;
+}
+
+// --- Weather data cache + UI helpers ---
+//
+// The g_weatherData cache and forward decls are hoisted up next to the
+// other static state at the top of the file. Definitions of the helpers
+// live here next to the public ui_setWeather* functions.
+
+static void update_weather_button_label() {
+    if (!lbl_weather) return;
+    char buf[24];
+    if (g_weatherValid) {
+        if (settings_isMetric()) {
+            snprintf(buf, sizeof(buf), "%dC UV%d",
+                     g_weatherData.temp_c, g_weatherData.uv_index);
+        } else {
+            snprintf(buf, sizeof(buf), "%dF UV%d",
+                     g_weatherData.temp_f, g_weatherData.uv_index);
+        }
+    } else if (g_weatherErr[0]) {
+        // Surface the last failure reason directly on the button so the
+        // user can self-diagnose without serial: "no WiFi", "HTTP 0",
+        // "parse fail", "no fcst", etc.
+        snprintf(buf, sizeof(buf), "%s", g_weatherErr);
+    } else {
+        snprintf(buf, sizeof(buf), "Weather...");
+    }
+    lv_label_set_text(lbl_weather, buf);
+    lv_obj_invalidate(lbl_weather);
+}
+
+void ui_setWeatherData(const WeatherData& data) {
+    g_weatherData = data;
+    g_weatherValid = true;
+    g_weatherErr[0] = '\0';  // clear last error on success
+    update_weather_button_label();
+    w_render_subscreen();
+}
+
+void ui_setWeatherPending() {
+    if (!lbl_weather) return;
+    lv_label_set_text(lbl_weather, "Weather...");
+    lv_obj_invalidate(lbl_weather);
+}
+
+void ui_setWeatherFailed() {
+    ui_setWeatherError("fail");
+}
+
+void ui_setWeatherError(const char* err_code) {
+    g_weatherValid = false;
+    if (err_code) {
+        strncpy(g_weatherErr, err_code, sizeof(g_weatherErr) - 1);
+        g_weatherErr[sizeof(g_weatherErr) - 1] = '\0';
+    }
+    update_weather_button_label();
+    w_render_subscreen();
 }
 
 void ui_refreshSteps() {

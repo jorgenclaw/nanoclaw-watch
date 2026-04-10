@@ -161,3 +161,141 @@ bool net_pollForResponse(char* reply_buf, size_t reply_buf_size) {
     http.end();
     return hasNew;
 }
+
+// Helper — fill the err_buf if provided, otherwise no-op.
+static void wx_set_err(char* err_buf, size_t err_buf_size, const char* msg) {
+    if (!err_buf || err_buf_size == 0) return;
+    strncpy(err_buf, msg, err_buf_size - 1);
+    err_buf[err_buf_size - 1] = '\0';
+}
+
+bool net_fetchWeather(WeatherData* out, char* err_buf, size_t err_buf_size) {
+    if (!out) {
+        wx_set_err(err_buf, err_buf_size, "null out");
+        return false;
+    }
+    if (!net_isConnected()) {
+        Serial.println("[weather] no WiFi");
+        wx_set_err(err_buf, err_buf_size, "no WiFi");
+        return false;
+    }
+
+    HTTPClient http;
+    String url = String("http://wttr.in/") + WEATHER_LOCATION + "?format=j1";
+    http.begin(url);
+    // wttr.in serves much faster + more reliably with a real User-Agent
+    // than the default ESP HTTPClient string, which sometimes gets the
+    // ASCII fallback page instead of JSON. Connection: close keeps the
+    // socket from hanging open after the response.
+    http.addHeader("User-Agent", "curl/7.85.0");
+    http.addHeader("Accept", "application/json");
+    http.addHeader("Connection", "close");
+    // 15 sec instead of HTTP_TIMEOUT_MS (60 sec) — the watch loop blocks
+    // here, so a 60-sec freeze on weather failure is unacceptable. wttr.in
+    // is normally quick (1-3 sec) when reachable.
+    http.setTimeout(15000);
+
+    int code = http.GET();
+    Serial.printf("[weather] GET %s -> %d\n", url.c_str(), code);
+    if (code != 200) {
+        http.end();
+        char msg[16];
+        snprintf(msg, sizeof(msg), "HTTP %d", code);
+        wx_set_err(err_buf, err_buf_size, msg);
+        return false;
+    }
+
+    // Filter mirrors the structure of the response. Subscript syntax —
+    // ArduinoJson treats `filter[key][0]` as the template applied to all
+    // elements of the matching input array. We need today (weather[0])
+    // for sunrise/sunset/today's max, and tomorrow (weather[1]) for
+    // tomorrow's max + the "tonight low".
+    DynamicJsonDocument filter(1024);
+    filter["current_condition"][0]["temp_F"]         = true;
+    filter["current_condition"][0]["temp_C"]         = true;
+    filter["current_condition"][0]["uvIndex"]        = true;
+    filter["current_condition"][0]["windspeedMiles"] = true;
+    filter["current_condition"][0]["windspeedKmph"]  = true;
+    filter["current_condition"][0]["winddir16Point"] = true;
+    filter["weather"][0]["maxtempF"]                 = true;
+    filter["weather"][0]["maxtempC"]                 = true;
+    filter["weather"][0]["mintempF"]                 = true;
+    filter["weather"][0]["mintempC"]                 = true;
+    filter["weather"][0]["astronomy"][0]["sunrise"]  = true;
+    filter["weather"][0]["astronomy"][0]["sunset"]   = true;
+
+    // Buffer the full response body via getString() instead of stream-
+    // parsing. The first attempt used http.getStream() + deserializeJson
+    // directly, which appeared to interact badly with chunked transfer
+    // encoding from wttr.in — the parser succeeded but produced an empty
+    // current_condition. Buffering the body sidesteps that entirely at
+    // the cost of ~40 KB of heap during the parse (well within the
+    // ESP32-S3's 320 KB DRAM budget).
+    String body = http.getString();
+    http.end();
+    Serial.printf("[weather] body length = %d\n", body.length());
+
+    DynamicJsonDocument doc(4096);
+    DeserializationError err = deserializeJson(
+        doc, body, DeserializationOption::Filter(filter));
+
+    if (err) {
+        Serial.printf("[weather] JSON parse error: %s\n", err.c_str());
+        wx_set_err(err_buf, err_buf_size, "parse fail");
+        return false;
+    }
+
+    // current_condition (note: wttr.in returns ALL these as strings, so
+    // ArduinoJson's "| 0" / "| def" syntax does the conversion for us via
+    // implicit cast on the | default).
+    JsonObject cc = doc["current_condition"][0];
+    if (cc.isNull()) {
+        Serial.println("[weather] no current_condition[0]");
+        wx_set_err(err_buf, err_buf_size, "no cc");
+        return false;
+    }
+    out->temp_f   = atoi(cc["temp_F"]         | "0");
+    out->temp_c   = atoi(cc["temp_C"]         | "0");
+    out->uv_index = atoi(cc["uvIndex"]        | "0");
+    out->wind_mph = atoi(cc["windspeedMiles"] | "0");
+    out->wind_kph = atoi(cc["windspeedKmph"]  | "0");
+    const char* dir = cc["winddir16Point"] | "--";
+    strncpy(out->wind_dir, dir, sizeof(out->wind_dir) - 1);
+    out->wind_dir[sizeof(out->wind_dir) - 1] = '\0';
+
+    // weather[0] = today (for max + sunrise/sunset)
+    JsonArray weather = doc["weather"];
+    if (weather.size() < 2) {
+        Serial.println("[weather] not enough weather days in response");
+        wx_set_err(err_buf, err_buf_size, "no fcst");
+        return false;
+    }
+    JsonObject today = weather[0];
+    out->today_max_f = atoi(today["maxtempF"] | "0");
+    out->today_max_c = atoi(today["maxtempC"] | "0");
+
+    JsonObject astro = today["astronomy"][0];
+    const char* sr = astro["sunrise"] | "--:--";
+    const char* ss = astro["sunset"]  | "--:--";
+    strncpy(out->sunrise, sr, sizeof(out->sunrise) - 1);
+    out->sunrise[sizeof(out->sunrise) - 1] = '\0';
+    strncpy(out->sunset,  ss, sizeof(out->sunset)  - 1);
+    out->sunset[sizeof(out->sunset) - 1] = '\0';
+
+    // weather[1] = tomorrow (for tomorrow max + the "tonight low" — i.e.
+    // the coming morning's minimum, which is the daily min for tomorrow's
+    // calendar day in wttr.in's data model)
+    JsonObject tomorrow = weather[1];
+    out->tomorrow_max_f = atoi(tomorrow["maxtempF"] | "0");
+    out->tomorrow_max_c = atoi(tomorrow["maxtempC"] | "0");
+    out->tonight_min_f  = atoi(tomorrow["mintempF"] | "0");
+    out->tonight_min_c  = atoi(tomorrow["mintempC"] | "0");
+
+    Serial.printf("[weather] %dF/%dC UV%d wind %d mph %s | "
+                  "today %dF tomorrow %dF tonight %dF | sun %s-%s\n",
+                  out->temp_f, out->temp_c, out->uv_index,
+                  out->wind_mph, out->wind_dir,
+                  out->today_max_f, out->tomorrow_max_f, out->tonight_min_f,
+                  out->sunrise, out->sunset);
+    return true;
+}

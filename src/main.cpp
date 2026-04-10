@@ -21,11 +21,21 @@
 #include "state.h"
 #include "network.h"
 #include "ui.h"
+#include "settings.h"
 
 // Reply buffer for HTTP responses. Sized to fit typical Jorgenclaw replies
 // (multi-paragraph responses can run several KB). Must be at least as large
 // as state.cpp's g_responseText to avoid double truncation.
 static char g_replyBuf[4096];
+
+// Weather button background refresh state. Refreshed automatically every
+// WEATHER_REFRESH_MS while WiFi is up, or immediately on tap.
+static uint32_t g_lastWeatherFetchMs = 0;
+static uint32_t g_lastWeatherTryMs   = 0;  // even on failure — for backoff
+static bool     g_weatherEverFetched = false;
+// Backoff after a failed fetch — 60 seconds, so we don't hammer wttr.in
+// or block the main loop on every iteration.
+static const uint32_t WEATHER_RETRY_MS = 60000;
 static uint32_t g_lastPollMs = 0;
 static bool g_powerKeyPressed = false;
 // Set to true by the recording loop's direct touch poll (or as a fallback
@@ -42,6 +52,7 @@ static volatile bool g_cancelRecording = false;
 static void doVoiceCapture();
 static void doQuickPrompt(int idx);
 static void doPoll();
+static void doWeatherFetch();
 static void enterLightSleep();
 
 // =============================================================================
@@ -119,8 +130,20 @@ void onQuickPromptPressed(int idx) {
         }
         return;
     }
-    // Slots 0 and 3 are regular text prompts — POST the configured prompt
-    // text to the host as a watch message.
+    // Slot 3 is the Weather button — opens the Weather sub-screen which
+    // shows current temp + forecast + sunrise/sunset + a unit toggle and
+    // a Refresh button. Background auto-refresh keeps the data fresh
+    // every 30 min, so the user can usually open the screen and see
+    // recent data without forcing a fetch.
+    if (idx == 3) {
+        Serial.println("[ui] weather button tapped — opening sub-screen");
+        instance.vibrator();
+        setState(STATE_WEATHER);
+        ui_showWeather();
+        return;
+    }
+    // Slot 0 is a regular text prompt — POST the configured prompt text
+    // to the host as a watch message.
     doQuickPrompt(idx);
 }
 
@@ -442,6 +465,33 @@ static void doQuickPrompt(int idx) {
     }
 }
 
+static void doWeatherFetch() {
+    g_lastWeatherTryMs = millis();
+    if (!net_isConnected()) {
+        Serial.println("[weather] skip — no WiFi");
+        ui_setWeatherError("no WiFi");
+        return;
+    }
+    Serial.println("[weather] fetching");
+    ui_setWeatherPending();
+    WeatherData data;
+    char err_buf[16] = {0};
+    if (net_fetchWeather(&data, err_buf, sizeof(err_buf))) {
+        ui_setWeatherData(data);
+        g_weatherEverFetched = true;
+        g_lastWeatherFetchMs = millis();
+    } else {
+        ui_setWeatherError(err_buf[0] ? err_buf : "fail");
+    }
+}
+
+// Bridge for the weather sub-screen's Refresh button. ui.cpp can't call
+// doWeatherFetch() directly (that would be a circular include); it calls
+// this trampoline instead.
+void doWeatherFetchTriggered() {
+    doWeatherFetch();
+}
+
 static void doPoll() {
     if (!net_isConnected()) return;
     if (currentState() != STATE_HOME) return;   // don't interrupt active work
@@ -509,6 +559,10 @@ void setup() {
     delay(500);
     Serial.println("\n=== NanoClaw Watch boot ===");
 
+    // Persistent app settings (NVS-backed). Load BEFORE ui_init so the
+    // first paint of any screen reflects the right unit/etc.
+    settings_load();
+
     // Hardware init (display, touch, sensors, mic, PMU, RTC, haptic)
     instance.begin();
     beginLvglHelper(instance);
@@ -552,6 +606,23 @@ void loop() {
 
     ui_tick();                // refresh clock + battery
     doPoll();                 // poll host for new responses
+
+    // Weather background refresh. Two timers:
+    //   - g_lastWeatherFetchMs: time of last SUCCESSFUL fetch. Drives the
+    //     30-minute auto-refresh interval.
+    //   - g_lastWeatherTryMs: time of last ATTEMPT (success or fail).
+    //     Used as a 60-sec backoff so failed fetches don't hammer the
+    //     wttr.in server (and don't block the main loop on every iteration).
+    if (currentState() == STATE_HOME && net_isConnected()) {
+        bool need_first      = !g_weatherEverFetched && g_lastWeatherTryMs == 0;
+        bool need_retry      = !g_weatherEverFetched && g_lastWeatherTryMs != 0 &&
+                               (millis() - g_lastWeatherTryMs > WEATHER_RETRY_MS);
+        bool need_refresh    = g_weatherEverFetched &&
+                               (millis() - g_lastWeatherFetchMs > WEATHER_REFRESH_MS);
+        if (need_first || need_retry || need_refresh) {
+            doWeatherFetch();
+        }
+    }
 
     // Handle queued power-key sleep request
     if (g_powerKeyPressed) {

@@ -26,6 +26,7 @@ static lv_obj_t* lbl_time         = nullptr;
 static lv_obj_t* lbl_date         = nullptr;
 static lv_obj_t* lbl_battery      = nullptr;
 static lv_obj_t* lbl_wifi         = nullptr;
+static lv_obj_t* lbl_steps        = nullptr;  // BMA423 pedometer count, top bar centered
 static lv_obj_t* lbl_status       = nullptr;  // secondary status line (errors / "No speech")
 static lv_obj_t* speak_btn        = nullptr;
 static lv_obj_t* speak_lbl        = nullptr;  // the label *inside* the speak button — primary indicator
@@ -81,6 +82,15 @@ static void build_home_screen() {
     lv_label_set_text(lbl_wifi, "WiFi -");
     lv_obj_set_style_text_font(lbl_wifi, &lv_font_montserrat_14, 0);
     lv_obj_align(lbl_wifi, LV_ALIGN_TOP_RIGHT, -8, 6);
+
+    // Step counter — center of the top status bar between battery (left) and
+    // WiFi (right). Updated alongside battery on the 30-sec cadence so we
+    // don't hammer the BMA423 over I2C every loop iteration.
+    lbl_steps = lv_label_create(home_screen);
+    lv_label_set_text(lbl_steps, "0 steps");
+    lv_obj_set_style_text_font(lbl_steps, &lv_font_montserrat_12, 0);
+    lv_obj_set_style_text_color(lbl_steps, lv_color_hex(0x888888), 0);
+    lv_obj_align(lbl_steps, LV_ALIGN_TOP_MID, 0, 8);
 
     // Clock — large
     lbl_time = lv_label_create(home_screen);
@@ -153,6 +163,15 @@ static void build_response_screen() {
     response_screen = lv_obj_create(NULL);
     lv_obj_set_style_bg_color(response_screen, lv_color_hex(0x000000), 0);
     lv_obj_set_style_text_color(response_screen, lv_color_hex(0xE8E8E8), 0);
+
+    // App-name header in the top-left corner so it's visually clear which
+    // screen the user is on. Small label, dim color — informational only,
+    // not a tap target.
+    lv_obj_t* header = lv_label_create(response_screen);
+    lv_label_set_text(header, "Jorgenclaw");
+    lv_obj_set_style_text_font(header, &lv_font_montserrat_14, 0);
+    lv_obj_set_style_text_color(header, lv_color_hex(0x888888), 0);
+    lv_obj_align(header, LV_ALIGN_TOP_LEFT, 8, 12);
 
     // Dedicated close button in the top-right corner. Replaces the previous
     // "tap anywhere to dismiss" handler — that fired LV_EVENT_CLICKED at the
@@ -292,21 +311,42 @@ static void update_clock() {
         lv_label_set_text(lbl_date, "syncing...");
         return;
     }
-    char buf[16];
-    strftime(buf, sizeof(buf), "%H:%M", &timeinfo);
+    char buf[24];
+
+    // Time format: 12-hour with AM/PM, no leading zero on the hour ("9:14 PM").
+    // Built manually for the same reason the date is — newlib's strftime
+    // doesn't support the GNU "%-I" no-leading-zero extension and would
+    // print a literal "?" in its place.
+    int hour12 = timeinfo.tm_hour % 12;
+    if (hour12 == 0) hour12 = 12;
+    const char* ampm = (timeinfo.tm_hour < 12) ? "AM" : "PM";
+    snprintf(buf, sizeof(buf), "%d:%02d %s", hour12, timeinfo.tm_min, ampm);
     lv_label_set_text(lbl_time, buf);
-    strftime(buf, sizeof(buf), "%a %b %-d", &timeinfo);
+
+    // Date format: "Thu Apr 9". Built manually because newlib (which ESP32
+    // ships) does NOT support the GNU "%-d" extension for day-of-month
+    // without a leading zero — strftime emits a literal "?" for unknown
+    // specifiers, which is exactly what was showing up on screen.
+    char wd_mo[12];
+    strftime(wd_mo, sizeof(wd_mo), "%a %b", &timeinfo);
+    snprintf(buf, sizeof(buf), "%s %d", wd_mo, timeinfo.tm_mday);
     lv_label_set_text(lbl_date, buf);
 }
 
 static void update_battery() {
     int pct = instance.pmu.getBatteryPercent();
     bool charging = instance.pmu.isCharging();
-    char buf[16];
+    char buf[24];
     snprintf(buf, sizeof(buf), "%s%d%%", charging ? "+" : "BAT ", pct);
     lv_label_set_text(lbl_battery, buf);
 
     lv_label_set_text(lbl_wifi, net_isConnected() ? "WiFi OK" : "WiFi -");
+
+    // Step count from the BMA423 pedometer (already enabled in setup() via
+    // configureMotionWake → instance.sensor.enablePedometer()).
+    uint32_t steps = instance.sensor.getPedometerCounter();
+    snprintf(buf, sizeof(buf), "%lu steps", (unsigned long)steps);
+    lv_label_set_text(lbl_steps, buf);
 }
 
 void ui_tick() {

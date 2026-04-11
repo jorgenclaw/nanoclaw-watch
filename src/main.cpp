@@ -22,6 +22,7 @@
 #include "network.h"
 #include "ui.h"
 #include "settings.h"
+#include "wake_word.h"
 
 // Reply buffer for HTTP responses. Sized to fit typical Jorgenclaw replies
 // (multi-paragraph responses can run several KB). Must be at least as large
@@ -559,6 +560,11 @@ void setup() {
     delay(500);
     Serial.println("\n=== NanoClaw Watch boot ===");
 
+    // Reserve PSRAM for the EI tensor arena BEFORE LilyGoLib's display +
+    // LVGL init eats most of the 8 MB PSRAM. The 213 KB tensor arena will
+    // not fit at runtime otherwise. See src/wake_word.cpp for details.
+    wake_word_preallocate();
+
     // Persistent app settings (NVS-backed). Load BEFORE ui_init so the
     // first paint of any screen reflects the right unit/etc.
     settings_load();
@@ -588,12 +594,31 @@ void setup() {
     setState(STATE_HOME);
     ui_showHome();
 
+    // Wake word ("Hey Jorgenclaw") — start the always-on inference task.
+    // Runs on core 0, shares the PDM mic with the recording loop via a
+    // STATE_HOME guard (pauses when recording is active). Only works
+    // while the chip is awake; light sleep pauses this task with
+    // everything else.
+#if WAKE_WORD_ENABLED
+    wake_word_task_start();
+#endif
+
     Serial.println("[main] setup complete");
 }
 
 void loop() {
     instance.loop();          // handles hardware events -> device_event_cb
     lv_task_handler();        // LVGL tick
+
+    // Wake word check — if the wake_word task flagged a detection, kick
+    // off a voice capture immediately (same code path as tapping the
+    // blue speak button). Only processes in STATE_HOME because
+    // doVoiceCapture assumes that's where we start.
+    if (wake_word_triggered() && currentState() == STATE_HOME) {
+        Serial.println("[main] wake word -> voice capture");
+        touchInteraction();
+        doVoiceCapture();
+    }
 
     net_loop();               // WiFi reconnect logic
 

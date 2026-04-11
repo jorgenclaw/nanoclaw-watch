@@ -92,6 +92,16 @@
 // --- NTP sync ---
 #define NTP_SERVER         "pool.ntp.org"
 
+// --- Wake word ("Hey Jorgenclaw") ---
+// When enabled, the wake_word FreeRTOS task runs continuously on core 0
+// and classifies ambient audio against the Edge Impulse model in
+// lib/Jorgenclaw-project-1_inferencing. On a match, the main loop starts
+// a voice recording — same flow as tapping the blue button.
+//
+// Limitation: only works while the watch is AWAKE. Light sleep halts the
+// task with the rest of the CPU. Tap the screen first to wake, then speak.
+#define WAKE_WORD_ENABLED    true
+
 // --- Weather ---
 // Location string passed to wttr.in. Use "City,State" or "City,Country" or
 // a postal code. URL-safe characters only — no spaces (use "+" if needed).

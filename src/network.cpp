@@ -1,7 +1,9 @@
 #include "network.h"
 #include "config.h"
+#include "settings.h"
 
 #include <WiFi.h>
+#include <WiFiMulti.h>
 #include <WiFiManager.h>
 #include <HTTPClient.h>
 #include <ArduinoJson.h>
@@ -9,34 +11,79 @@
 
 static uint32_t s_lastReconnectAttempt = 0;
 static const uint32_t RECONNECT_INTERVAL_MS = 10000;
+static WiFiMulti wifiMulti;
 
-// WiFiManager instance — kept alive so we can trigger the config portal
-// on demand (long-press WiFi icon) without reconstructing.
-static WiFiManager wm;
+// (Re)populate WiFiMulti from the NVS-backed credential slots.
+static void loadMultiCredentials() {
+    const WiFiCred* creds = settings_getWifiCreds();
+    int count = 0;
+    for (int i = 0; i < WIFI_MAX_NETWORKS; i++) {
+        if (creds[i].valid) {
+            wifiMulti.addAP(creds[i].ssid, creds[i].pass);
+            Serial.printf("[net] slot %d: %s\n", i, creds[i].ssid);
+            count++;
+        }
+    }
+    if (count == 0) Serial.println("[net] no saved networks");
+}
+
+// Run the WiFiManager captive portal. On success, saves the new
+// credentials to NVS via settings_addWifi (which handles dedup and
+// slot rotation). Returns true if the user configured a network.
+static bool runConfigPortal() {
+    WiFiManager wm;
+    wm.setConfigPortalTimeout(SETUP_PORTAL_TIMEOUT_SEC);
+    wm.setTitle("NanoClaw Watch");
+
+    Serial.println("[net] starting captive portal — AP: " SETUP_AP_NAME);
+    bool ok = wm.startConfigPortal(SETUP_AP_NAME);
+    if (ok) {
+        // WiFiManager connected successfully. Save the credentials to
+        // our own NVS storage so WiFiMulti can use them on next boot.
+        String ssid = WiFi.SSID();
+        String pass = wm.getWiFiPass();
+        if (ssid.length() > 0) {
+            settings_addWifi(ssid.c_str(), pass.c_str());
+            Serial.printf("[net] saved new network: %s\n", ssid.c_str());
+        }
+    }
+    return ok;
+}
 
 void net_begin() {
     WiFi.mode(WIFI_STA);
     WiFi.setAutoReconnect(true);
 
-    // WiFiManager checks for saved credentials in NVS. If found, it
-    // connects. If not (or connection fails after the timeout), it
-    // starts a captive portal AP so the user can configure WiFi from
-    // their phone — no USB or reflash required.
-    wm.setConfigPortalTimeout(SETUP_PORTAL_TIMEOUT_SEC);
-    wm.setConnectTimeout(WIFI_CONNECT_TIMEOUT_SEC);
-    // Minimal portal UI — no scan list (saves RAM + time).
-    wm.setMinimumSignalQuality(8);
-    // Dark theme for the tiny watch screen isn't relevant — the portal
-    // is viewed on the user's phone browser, not the watch.
-    wm.setTitle("NanoClaw Watch");
+    // Load saved networks into WiFiMulti.
+    loadMultiCredentials();
 
-    Serial.println("[net] WiFiManager autoConnect starting...");
-    bool connected = wm.autoConnect(SETUP_AP_NAME);
-    if (connected) {
+    // Check if we have any saved networks to try.
+    const WiFiCred* creds = settings_getWifiCreds();
+    bool hasNetworks = false;
+    for (int i = 0; i < WIFI_MAX_NETWORKS; i++) {
+        if (creds[i].valid) { hasNetworks = true; break; }
+    }
+
+    if (hasNetworks) {
+        // Try connecting to any of the saved networks.
+        Serial.println("[net] trying saved networks...");
+        uint32_t start = millis();
+        while (wifiMulti.run() != WL_CONNECTED &&
+               millis() - start < WIFI_CONNECT_TIMEOUT_SEC * 1000) {
+            delay(500);
+        }
+    }
+
+    if (WiFi.status() == WL_CONNECTED) {
         Serial.printf("[net] connected to %s\n", WiFi.SSID().c_str());
     } else {
-        Serial.println("[net] WiFiManager timed out — rebooting");
-        ESP.restart();
+        // No saved networks, or none in range — open the config portal.
+        Serial.println("[net] no saved network available — opening portal");
+        bool ok = runConfigPortal();
+        if (!ok) {
+            Serial.println("[net] portal timed out — rebooting");
+            ESP.restart();
+        }
     }
     s_lastReconnectAttempt = millis();
 }
@@ -59,26 +106,22 @@ void net_loop() {
     }
     printed_ip = false;
     if (millis() - s_lastReconnectAttempt < RECONNECT_INTERVAL_MS) return;
+    // Try all saved networks on reconnect.
     Serial.println("[net] reconnecting...");
-    WiFi.disconnect();
-    WiFi.reconnect();
+    wifiMulti.run();
     s_lastReconnectAttempt = millis();
 }
 
 void net_startConfigPortal() {
-    Serial.println("[net] starting config portal on demand");
-    wm.setConfigPortalTimeout(SETUP_PORTAL_TIMEOUT_SEC);
-    // resetSettings clears saved credentials so the portal opens fresh.
-    wm.resetSettings();
-    // startConfigPortal blocks until the user submits credentials or
-    // the timeout elapses. On success WiFi connects automatically.
-    bool ok = wm.startConfigPortal(SETUP_AP_NAME);
-    if (ok) {
-        Serial.printf("[net] reconfigured — connected to %s\n", WiFi.SSID().c_str());
-    } else {
+    Serial.println("[net] config portal requested");
+    bool ok = runConfigPortal();
+    if (!ok) {
         Serial.println("[net] portal timed out — rebooting");
         ESP.restart();
     }
+    // Rebuild WiFiMulti with the updated credential list.
+    wifiMulti = WiFiMulti();
+    loadMultiCredentials();
 }
 
 void net_syncTime() {

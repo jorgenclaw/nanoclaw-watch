@@ -23,3 +23,23 @@ void settings_load();
 // Default on first boot is imperial.
 bool settings_isMetric();
 void settings_setMetric(bool metric);
+
+// --- Multi-network WiFi credentials (up to 3 saved networks) ----------------
+
+static const int WIFI_MAX_NETWORKS = 3;
+
+struct WiFiCred {
+    char ssid[64];
+    char pass[64];
+    bool valid;   // true if this slot has credentials
+};
+
+// Returns the array of 3 credential slots (loaded from NVS by settings_load).
+const WiFiCred* settings_getWifiCreds();
+
+// Save a new network. Writes to the first empty slot; if all 3 are full,
+// overwrites the oldest (slot 0, shifting the others down).
+void settings_addWifi(const char* ssid, const char* password);
+
+// Clear all saved WiFi networks.
+void settings_clearAllWifi();

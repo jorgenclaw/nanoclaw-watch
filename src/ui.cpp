@@ -1000,41 +1000,54 @@ static void build_weather_screen() {
     make_title(weather_screen, "Weather");
     make_close_btn(weather_screen, w_close_cb);
 
+    // Location label — small, grey, below the title. Shows which city
+    // the weather data is for (from WEATHER_LOCATION in config.h).
+    {
+        lv_obj_t* loc_lbl = lv_label_create(weather_screen);
+        // Clean up "Manteca,CA" → "Manteca, CA" for readability.
+        String loc = WEATHER_LOCATION;
+        loc.replace(",", ", ");
+        lv_label_set_text(loc_lbl, loc.c_str());
+        lv_obj_set_style_text_font(loc_lbl, &lv_font_montserrat_12, 0);
+        lv_obj_set_style_text_color(loc_lbl, lv_color_hex(0x888888), 0);
+        lv_obj_align(loc_lbl, LV_ALIGN_TOP_MID, 0, 26);
+    }
+
     // Big current-temperature display, font 36, centered horizontally.
     w_temp_lbl = lv_label_create(weather_screen);
     lv_label_set_text(w_temp_lbl, "--F");
     lv_obj_set_style_text_font(w_temp_lbl, &lv_font_montserrat_36, 0);
-    lv_obj_align(w_temp_lbl, LV_ALIGN_TOP_MID, 0, 38);
+    lv_obj_align(w_temp_lbl, LV_ALIGN_TOP_MID, 0, 42);
 
     // Three forecast rows — top-left aligned with small left margin so the
     // text feels like a list, not centered floats.
     w_today_lbl = lv_label_create(weather_screen);
     lv_label_set_text(w_today_lbl, "Today      --");
     lv_obj_set_style_text_font(w_today_lbl, &lv_font_montserrat_14, 0);
-    lv_obj_align(w_today_lbl, LV_ALIGN_TOP_LEFT, 22, 90);
+    lv_obj_align(w_today_lbl, LV_ALIGN_TOP_LEFT, 22, 94);
 
     w_tomorrow_lbl = lv_label_create(weather_screen);
     lv_label_set_text(w_tomorrow_lbl, "Tomorrow   --");
     lv_obj_set_style_text_font(w_tomorrow_lbl, &lv_font_montserrat_14, 0);
-    lv_obj_align(w_tomorrow_lbl, LV_ALIGN_TOP_LEFT, 22, 108);
+    lv_obj_align(w_tomorrow_lbl, LV_ALIGN_TOP_LEFT, 22, 112);
 
     w_tonight_lbl = lv_label_create(weather_screen);
     lv_label_set_text(w_tonight_lbl, "Tonight    --");
     lv_obj_set_style_text_font(w_tonight_lbl, &lv_font_montserrat_14, 0);
-    lv_obj_align(w_tonight_lbl, LV_ALIGN_TOP_LEFT, 22, 126);
+    lv_obj_align(w_tonight_lbl, LV_ALIGN_TOP_LEFT, 22, 130);
 
     // UV + wind line, slightly smaller font to fit more.
     w_uv_wind_lbl = lv_label_create(weather_screen);
     lv_label_set_text(w_uv_wind_lbl, "UV --   Wind --");
     lv_obj_set_style_text_font(w_uv_wind_lbl, &lv_font_montserrat_14, 0);
-    lv_obj_align(w_uv_wind_lbl, LV_ALIGN_TOP_MID, 0, 148);
+    lv_obj_align(w_uv_wind_lbl, LV_ALIGN_TOP_MID, 0, 152);
 
     // Sunrise / sunset line, smaller still.
     w_sun_lbl = lv_label_create(weather_screen);
     lv_label_set_text(w_sun_lbl, "Sunrise --:--  Sunset --:--");
     lv_obj_set_style_text_font(w_sun_lbl, &lv_font_montserrat_12, 0);
     lv_obj_set_style_text_color(w_sun_lbl, lv_color_hex(0xAAAAAA), 0);
-    lv_obj_align(w_sun_lbl, LV_ALIGN_TOP_MID, 0, 168);
+    lv_obj_align(w_sun_lbl, LV_ALIGN_TOP_MID, 0, 172);
 
     // Status line — right above the buttons. Shows "OK" on success or
     // the failure reason on failure ("HTTP 0", "no WiFi", "parse fail").
@@ -1043,7 +1056,7 @@ static void build_weather_screen() {
     lv_label_set_text(w_status_lbl, "");
     lv_obj_set_style_text_font(w_status_lbl, &lv_font_montserrat_10, 0);
     lv_obj_set_style_text_color(w_status_lbl, lv_color_hex(0x888888), 0);
-    lv_obj_align(w_status_lbl, LV_ALIGN_TOP_MID, 0, 184);
+    lv_obj_align(w_status_lbl, LV_ALIGN_TOP_MID, 0, 188);
 
     // Bottom row: F/C unit toggle + Refresh button.
     // Small toggle on the left, wider Refresh on the right.

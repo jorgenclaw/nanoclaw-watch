@@ -574,11 +574,6 @@ void setup() {
     delay(500);
     Serial.println("\n=== NanoClaw Watch boot ===");
 
-    // Reserve PSRAM for the EI tensor arena BEFORE LilyGoLib's display +
-    // LVGL init eats most of the 8 MB PSRAM. The 213 KB tensor arena will
-    // not fit at runtime otherwise. See src/wake_word.cpp for details.
-    wake_word_preallocate();
-
     // Persistent app settings (NVS-backed). Load BEFORE ui_init so the
     // first paint of any screen reflects the right unit/etc.
     settings_load();
@@ -603,10 +598,20 @@ void setup() {
     state_init();
     ui_init();
 
-    // Network
+    // Network — may block if no saved credentials (captive portal).
+    // Runs BEFORE the EI heap allocation so the portal has full PSRAM.
     net_begin();
     setState(STATE_HOME);
     ui_showHome();
+
+    // Reserve PSRAM for the EI tensor arena AFTER WiFi connects and
+    // LilyGoLib is initialized. Must run before wake_word_task_start().
+    // The earlier this ran (as the first line of setup), the captive
+    // portal would crash because the 3 MB EI heap + LilyGoLib's ~5 MB
+    // left no PSRAM for WiFiManager's web server. Moving it here means
+    // the portal runs with full PSRAM, and the EI heap grabs its 3 MB
+    // only after WiFi is settled.
+    wake_word_preallocate();
 
     // Wake word ("Hey Jorgenclaw") — start the always-on inference task.
     // Runs on core 0, shares the PDM mic with the recording loop via a

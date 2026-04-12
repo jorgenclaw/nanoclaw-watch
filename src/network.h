@@ -46,6 +46,22 @@ struct WeatherData {
     char sunset[12];             // "07:48 PM"
 };
 
+// --- Proactive notifications ---
+
+struct WatchNotification {
+    char id[48];
+    char type[8];           // "email" or "signal"
+    char from[32];
+    char preview[64];
+    char full_text[1024];
+    char timestamp[32];
+};
+
+// Poll for new notifications since the given ISO timestamp. Fills `out`
+// array (up to `max_count` items). Returns the number of notifications.
+int net_pollNotifications(const char* since_iso,
+                          WatchNotification* out, int max_count);
+
 // Fetch current weather from wttr.in for the location in WEATHER_LOCATION
 // (configured in config.h). Populates `out` on success. Returns true on
 // success, false on network failure or parse failure. Writes a short

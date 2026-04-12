@@ -9,6 +9,12 @@
 // WiFi credentials are stored in NVS (persist across reflashes) and
 // configured via a captive portal on first boot or on demand. No need
 // to edit source code to change networks.
+// --- Notifications ---
+#define NOTIF_POLL_INTERVAL_MS   90000   // 90 seconds between polls
+#define NOTIF_BANNER_TIMEOUT_MS   8000   // auto-dismiss banner after 8s
+#define NOTIF_POLL_HTTP_TIMEOUT  10000   // shorter timeout than voice (10s)
+
+// --- WiFi provisioning ---
 #define SETUP_AP_NAME           "Jorgenclaw-Setup"
 #define SETUP_PORTAL_TIMEOUT_SEC 120   // auto-reboot if nobody configures
 #define WIFI_CONNECT_TIMEOUT_SEC  15   // seconds before falling back to portal

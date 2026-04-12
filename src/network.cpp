@@ -407,3 +407,59 @@ bool net_fetchWeather(WeatherData* out, char* err_buf, size_t err_buf_size) {
                   out->sunrise, out->sunset);
     return true;
 }
+
+// =============================================================================
+// Notification polling
+// =============================================================================
+
+int net_pollNotifications(const char* since_iso,
+                          WatchNotification* out, int max_count) {
+    if (!net_isConnected()) return 0;
+
+    String url = String(NANOCLAW_HOST_URL)
+        + "/api/watch/notifications?since="
+        + String(since_iso);
+
+    HTTPClient http;
+    http.begin(url);
+    http.addHeader("X-Watch-Token", WATCH_AUTH_TOKEN);
+    http.setTimeout(NOTIF_POLL_HTTP_TIMEOUT);
+
+    int code = http.GET();
+    if (code != 200) {
+        if (code > 0) {
+            Serial.printf("[notif] poll got HTTP %d\n", code);
+        }
+        http.end();
+        return 0;
+    }
+
+    String body = http.getString();
+    http.end();
+
+    DynamicJsonDocument doc(4096);
+    DeserializationError err = deserializeJson(doc, body);
+    if (err) {
+        Serial.printf("[notif] JSON parse error: %s\n", err.c_str());
+        return 0;
+    }
+
+    JsonArray arr = doc["notifications"];
+    int count = 0;
+    for (JsonObject item : arr) {
+        if (count >= max_count) break;
+        WatchNotification& n = out[count];
+        strncpy(n.id,        item["id"]        | "", sizeof(n.id) - 1);
+        strncpy(n.type,      item["type"]      | "", sizeof(n.type) - 1);
+        strncpy(n.from,      item["from"]      | "", sizeof(n.from) - 1);
+        strncpy(n.preview,   item["preview"]   | "", sizeof(n.preview) - 1);
+        strncpy(n.full_text, item["full_text"] | "", sizeof(n.full_text) - 1);
+        strncpy(n.timestamp, item["timestamp"] | "", sizeof(n.timestamp) - 1);
+        count++;
+    }
+
+    if (count > 0) {
+        Serial.printf("[notif] received %d notification(s)\n", count);
+    }
+    return count;
+}

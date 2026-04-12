@@ -1112,6 +1112,119 @@ void ui_showWeather() {
     lv_screen_load(weather_screen);
 }
 
+// =============================================================================
+// Notification banner (overlay on lv_layer_top) + detail screen
+// =============================================================================
+
+static lv_obj_t* notif_banner       = nullptr;
+static lv_obj_t* notif_banner_from  = nullptr;
+static lv_obj_t* notif_banner_text  = nullptr;
+static uint32_t  g_bannerShowMs     = 0;
+
+// Cached full text for tap-to-expand.
+static char g_notifFrom[32]     = {0};
+static char g_notifFullText[1024] = {0};
+
+static lv_obj_t* notif_detail_screen = nullptr;
+static lv_obj_t* notif_detail_from   = nullptr;
+static lv_obj_t* notif_detail_body   = nullptr;
+
+static void notif_banner_tap_cb(lv_event_t* e) {
+    (void)e;
+    onNotifBannerTapped();
+}
+
+static void notif_close_cb(lv_event_t* e) {
+    (void)e;
+    onNotifDismissed();
+}
+
+static void build_notif_banner() {
+    // The banner lives on lv_layer_top() so it overlays any screen.
+    notif_banner = lv_obj_create(lv_layer_top());
+    lv_obj_remove_style_all(notif_banner);
+    lv_obj_set_size(notif_banner, 240, 52);
+    lv_obj_align(notif_banner, LV_ALIGN_BOTTOM_MID, 0, 0);
+    lv_obj_set_style_bg_opa(notif_banner, LV_OPA_90, 0);
+    lv_obj_set_style_bg_color(notif_banner, lv_color_hex(0x1E293B), 0);
+    lv_obj_set_style_radius(notif_banner, 0, 0);
+    lv_obj_set_style_pad_all(notif_banner, 6, 0);
+    lv_obj_add_flag(notif_banner, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_clear_flag(notif_banner, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_event_cb(notif_banner, notif_banner_tap_cb, LV_EVENT_CLICKED, NULL);
+
+    notif_banner_from = lv_label_create(notif_banner);
+    lv_obj_set_style_text_font(notif_banner_from, &lv_font_montserrat_12, 0);
+    lv_obj_set_style_text_color(notif_banner_from, lv_color_hex(0x60A5FA), 0);
+    lv_label_set_text(notif_banner_from, "");
+    lv_obj_align(notif_banner_from, LV_ALIGN_TOP_LEFT, 0, 0);
+
+    notif_banner_text = lv_label_create(notif_banner);
+    lv_obj_set_style_text_font(notif_banner_text, &lv_font_montserrat_12, 0);
+    lv_obj_set_style_text_color(notif_banner_text, lv_color_hex(0xE8E8E8), 0);
+    lv_label_set_text(notif_banner_text, "");
+    lv_obj_set_width(notif_banner_text, 226);
+    lv_label_set_long_mode(notif_banner_text, LV_LABEL_LONG_DOT);
+    lv_obj_align(notif_banner_text, LV_ALIGN_TOP_LEFT, 0, 16);
+
+    // Start hidden.
+    lv_obj_add_flag(notif_banner, LV_OBJ_FLAG_HIDDEN);
+}
+
+static void build_notif_detail_screen() {
+    notif_detail_screen = lv_obj_create(NULL);
+    lv_obj_set_style_bg_color(notif_detail_screen, lv_color_hex(0x000000), 0);
+    lv_obj_set_style_text_color(notif_detail_screen, lv_color_hex(0xE8E8E8), 0);
+
+    make_title(notif_detail_screen, "Notification");
+    make_close_btn(notif_detail_screen, notif_close_cb);
+
+    notif_detail_from = lv_label_create(notif_detail_screen);
+    lv_obj_set_style_text_font(notif_detail_from, &lv_font_montserrat_14, 0);
+    lv_obj_set_style_text_color(notif_detail_from, lv_color_hex(0x60A5FA), 0);
+    lv_label_set_text(notif_detail_from, "");
+    lv_obj_align(notif_detail_from, LV_ALIGN_TOP_LEFT, 8, 28);
+
+    // Scrollable body container.
+    lv_obj_t* body_cont = lv_obj_create(notif_detail_screen);
+    lv_obj_remove_style_all(body_cont);
+    lv_obj_set_size(body_cont, 230, 170);
+    lv_obj_align(body_cont, LV_ALIGN_TOP_LEFT, 5, 48);
+    lv_obj_set_style_bg_opa(body_cont, LV_OPA_TRANSP, 0);
+    lv_obj_add_flag(body_cont, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_scroll_dir(body_cont, LV_DIR_VER);
+
+    notif_detail_body = lv_label_create(body_cont);
+    lv_label_set_long_mode(notif_detail_body, LV_LABEL_LONG_WRAP);
+    lv_obj_set_width(notif_detail_body, 220);
+    lv_obj_set_style_text_font(notif_detail_body, &lv_font_montserrat_14, 0);
+    lv_label_set_text(notif_detail_body, "");
+}
+
+void ui_showNotifBanner(const char* from, const char* preview,
+                        const char* full_text) {
+    strncpy(g_notifFrom, from, sizeof(g_notifFrom) - 1);
+    strncpy(g_notifFullText, full_text, sizeof(g_notifFullText) - 1);
+    lv_label_set_text(notif_banner_from, from);
+    lv_label_set_text(notif_banner_text, preview);
+    lv_obj_clear_flag(notif_banner, LV_OBJ_FLAG_HIDDEN);
+    g_bannerShowMs = millis();
+}
+
+void ui_hideNotifBanner() {
+    if (notif_banner) lv_obj_add_flag(notif_banner, LV_OBJ_FLAG_HIDDEN);
+}
+
+bool ui_notifBannerVisible() {
+    return notif_banner && !lv_obj_has_flag(notif_banner, LV_OBJ_FLAG_HIDDEN);
+}
+
+void ui_showNotifDetail(const char* from, const char* full_text) {
+    lv_label_set_text(notif_detail_from, from);
+    lv_label_set_text(notif_detail_body, full_text);
+    lv_screen_load(notif_detail_screen);
+}
+
 // --- Public API ---
 
 void ui_init() {
@@ -1122,6 +1235,8 @@ void ui_init() {
     build_timer_screen();
     build_alarm_screen();
     build_weather_screen();
+    build_notif_banner();
+    build_notif_detail_screen();
     lv_screen_load(home_screen);
 }
 
@@ -1536,6 +1651,11 @@ void ui_tick() {
     }
     // Cheap — only does anything when a confirm is actually pending.
     update_steps_confirm_expiry();
+    // Auto-dismiss notification banner after timeout.
+    if (ui_notifBannerVisible() &&
+        now - g_bannerShowMs > NOTIF_BANNER_TIMEOUT_MS) {
+        ui_hideNotifBanner();
+    }
     // Stopwatch / timer / alarm tick. Runs unconditionally so timer +
     // stopwatch keep advancing even when their screens are closed and the
     // user is back on the home screen. Alarm check is throttled internally.

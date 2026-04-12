@@ -14,6 +14,7 @@ enum WatchState {
     STATE_RESPONSE,    // displaying agent response ("Reply" screen)
     STATE_CLOCK,       // clock sub-screen (alarm/timer/stopwatch)
     STATE_WEATHER,     // weather sub-screen (current + forecast + units)
+    STATE_NOTIFICATION,// notification detail (full text, scrollable)
     STATE_ERROR        // generic error display
 };
 

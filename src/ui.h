@@ -83,8 +83,23 @@ bool ui_alarmIsImminent(int minutes_window);
 //    1  send/stop zone (right 60% of button width)
 int ui_speakBtnHitTest(int x, int y);
 
+// --- Notifications ---
+
+// Show a notification banner at the bottom of the screen (overlays on
+// lv_layer_top, does not replace the current screen). Auto-dismisses
+// after NOTIF_BANNER_TIMEOUT_MS. Tap to expand to detail screen.
+void ui_showNotifBanner(const char* from, const char* preview,
+                        const char* full_text);
+void ui_hideNotifBanner();
+bool ui_notifBannerVisible();
+
+// Notification detail screen — full text, scrollable, back button.
+void ui_showNotifDetail(const char* from, const char* full_text);
+
 // Callbacks fired by UI buttons. Defined in main.cpp.
 extern void onSpeakButtonPressed();
 extern void onQuickPromptPressed(int idx);   // idx = 0..3
 extern void onSleepButtonPressed();          // dedicated pinned-bottom Sleep button
 extern void onResponseDismissed();
+extern void onNotifBannerTapped();
+extern void onNotifDismissed();

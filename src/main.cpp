@@ -38,6 +38,9 @@ static bool     g_weatherEverFetched = false;
 // or block the main loop on every iteration.
 static const uint32_t WEATHER_RETRY_MS = 60000;
 static uint32_t g_lastPollMs = 0;
+static uint32_t g_lastNotifPollMs = 0;
+static char     g_lastNotifTimestamp[32] = "1970-01-01T00:00:00.000Z";
+static WatchNotification g_notifBuf[3];
 static bool g_powerKeyPressed = false;
 // Set to true by the recording loop's direct touch poll (or as a fallback
 // by onSpeakButtonPressed via the LVGL CLICK path) when the user taps the
@@ -53,6 +56,7 @@ static volatile bool g_cancelRecording = false;
 static void doVoiceCapture();
 static void doQuickPrompt(int idx);
 static void doPoll();
+static void doNotifPoll();
 static void doWeatherFetch();
 static void enterLightSleep();
 
@@ -169,6 +173,23 @@ void onSleepButtonPressed() {
     delay(150);  // extra debounce so the touch IRQ has settled
     Serial.println("[ui] finger released, entering sleep");
     enterLightSleep();
+}
+
+// The newest notification is cached in g_notifBuf[latest] by doNotifPoll,
+// and also cached inside ui.cpp by ui_showNotifBanner. For the detail
+// screen we use the most recent entry from our buffer.
+static int g_latestNotifIdx = 0;
+
+void onNotifBannerTapped() {
+    ui_hideNotifBanner();
+    setState(STATE_NOTIFICATION);
+    ui_showNotifDetail(g_notifBuf[g_latestNotifIdx].from,
+                       g_notifBuf[g_latestNotifIdx].full_text);
+}
+
+void onNotifDismissed() {
+    setState(STATE_HOME);
+    ui_showHome();
 }
 
 void onWifiLongPress() {
@@ -522,6 +543,33 @@ static void doPoll() {
     }
 }
 
+static void doNotifPoll() {
+    if (!net_isConnected()) return;
+    if (currentState() != STATE_HOME) return;
+    if (millis() - g_lastNotifPollMs < NOTIF_POLL_INTERVAL_MS) return;
+    g_lastNotifPollMs = millis();
+
+    int count = net_pollNotifications(g_lastNotifTimestamp, g_notifBuf, 3);
+    if (count <= 0) return;
+
+    // Update high-water mark to the newest timestamp received.
+    strncpy(g_lastNotifTimestamp, g_notifBuf[count - 1].timestamp,
+            sizeof(g_lastNotifTimestamp) - 1);
+
+    // Show banner for the most recent notification.
+    g_latestNotifIdx = count - 1;
+    WatchNotification& newest = g_notifBuf[g_latestNotifIdx];
+    ui_showNotifBanner(newest.from, newest.preview, newest.full_text);
+
+    // Double-buzz notification pattern (distinct from single confirmation buzz).
+    instance.vibrator();
+    delay(150);
+    instance.vibrator();
+
+    touchInteraction();  // prevent imminent idle-sleep
+    Serial.printf("[notif] showing: %s — %s\n", newest.from, newest.preview);
+}
+
 // =============================================================================
 // Sleep management
 // =============================================================================
@@ -650,6 +698,7 @@ void loop() {
 
     ui_tick();                // refresh clock + battery
     doPoll();                 // poll host for new responses
+    doNotifPoll();            // poll host for proactive notifications
 
     // Weather background refresh. Two timers:
     //   - g_lastWeatherFetchMs: time of last SUCCESSFUL fetch. Drives the

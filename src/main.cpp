@@ -171,6 +171,20 @@ void onSleepButtonPressed() {
     enterLightSleep();
 }
 
+void onWifiLongPress() {
+    if (currentState() != STATE_HOME) return;
+    Serial.println("[main] WiFi long-press — opening config portal");
+    instance.vibrator();
+    // Show a status on the watch before blocking in the portal.
+    ui_showError("WiFi Setup\nConnect to: " SETUP_AP_NAME);
+    lv_task_handler();
+    net_startConfigPortal();
+    // Portal returned — either connected or rebooting. Go home.
+    setState(STATE_HOME);
+    ui_showHome();
+    net_syncTime();
+}
+
 void onResponseDismissed() {
     setState(STATE_HOME);
     ui_showHome();

@@ -5,10 +5,13 @@
 // Edit these constants before flashing. Everything user-tunable lives here.
 // =============================================================================
 
-// --- WiFi credentials ---
-// TODO: Fill in before flashing
-#define WIFI_SSID            "Rockfish_Guest_optout_nomap"
-#define WIFI_PASSWORD        "beourguest"
+// --- WiFi provisioning ---
+// WiFi credentials are stored in NVS (persist across reflashes) and
+// configured via a captive portal on first boot or on demand. No need
+// to edit source code to change networks.
+#define SETUP_AP_NAME           "Jorgenclaw-Setup"
+#define SETUP_PORTAL_TIMEOUT_SEC 120   // auto-reboot if nobody configures
+#define WIFI_CONNECT_TIMEOUT_SEC  15   // seconds before falling back to portal
 
 // --- NanoClaw host endpoint ---
 // Base URL of your NanoClaw host. Watch will POST to:

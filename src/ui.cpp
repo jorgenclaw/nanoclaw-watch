@@ -167,10 +167,24 @@ static void build_home_screen() {
     lv_obj_set_style_text_font(lbl_battery, &lv_font_montserrat_14, 0);
     lv_obj_align(lbl_battery, LV_ALIGN_TOP_LEFT, 8, 6);
 
-    lbl_wifi = lv_label_create(home_screen);
+    // WiFi label — wrapped in a clickable object so long-press opens the
+    // WiFi config portal (captive AP for changing networks without USB).
+    lv_obj_t* wifi_btn = lv_obj_create(home_screen);
+    lv_obj_remove_style_all(wifi_btn);
+    lv_obj_set_size(wifi_btn, 80, 24);
+    lv_obj_align(wifi_btn, LV_ALIGN_TOP_RIGHT, -2, 2);
+    lv_obj_add_flag(wifi_btn, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_clear_flag(wifi_btn, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_event_cb(wifi_btn, [](lv_event_t* e) {
+        // Declared in main.cpp — triggers net_startConfigPortal.
+        extern void onWifiLongPress();
+        onWifiLongPress();
+    }, LV_EVENT_LONG_PRESSED, NULL);
+
+    lbl_wifi = lv_label_create(wifi_btn);
     lv_label_set_text(lbl_wifi, "WiFi -");
     lv_obj_set_style_text_font(lbl_wifi, &lv_font_montserrat_14, 0);
-    lv_obj_align(lbl_wifi, LV_ALIGN_TOP_RIGHT, -8, 6);
+    lv_obj_align(lbl_wifi, LV_ALIGN_CENTER, 0, 0);
 
     // Step counter used to live in the top bar center, but it moved into the
     // quick-button grid (slot 2 — bottom-left) so it's a tap target that

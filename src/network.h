@@ -5,9 +5,10 @@
 // Network — WiFi connection management + host HTTP API
 // =============================================================================
 
-void net_begin();              // start WiFi connect (non-blocking after first call)
+void net_begin();              // start WiFi connect via WiFiManager (blocks on first boot)
 bool net_isConnected();        // current WiFi link status
 void net_loop();               // call periodically; handles reconnect
+void net_startConfigPortal();  // open captive portal to reconfigure WiFi (blocks)
 
 // Send a text-only prompt to the host. Blocks for up to HTTP_TIMEOUT_MS.
 // Writes response into reply_buf (must be at least 512 bytes). Returns true on success.

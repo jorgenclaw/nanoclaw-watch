@@ -2,6 +2,7 @@
 #include "config.h"
 
 #include <WiFi.h>
+#include <WiFiManager.h>
 #include <HTTPClient.h>
 #include <ArduinoJson.h>
 #include <time.h>
@@ -9,12 +10,34 @@
 static uint32_t s_lastReconnectAttempt = 0;
 static const uint32_t RECONNECT_INTERVAL_MS = 10000;
 
+// WiFiManager instance — kept alive so we can trigger the config portal
+// on demand (long-press WiFi icon) without reconstructing.
+static WiFiManager wm;
+
 void net_begin() {
     WiFi.mode(WIFI_STA);
     WiFi.setAutoReconnect(true);
-    WiFi.persistent(false);
-    WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
-    Serial.printf("[net] connecting to %s\n", WIFI_SSID);
+
+    // WiFiManager checks for saved credentials in NVS. If found, it
+    // connects. If not (or connection fails after the timeout), it
+    // starts a captive portal AP so the user can configure WiFi from
+    // their phone — no USB or reflash required.
+    wm.setConfigPortalTimeout(SETUP_PORTAL_TIMEOUT_SEC);
+    wm.setConnectTimeout(WIFI_CONNECT_TIMEOUT_SEC);
+    // Minimal portal UI — no scan list (saves RAM + time).
+    wm.setMinimumSignalQuality(8);
+    // Dark theme for the tiny watch screen isn't relevant — the portal
+    // is viewed on the user's phone browser, not the watch.
+    wm.setTitle("NanoClaw Watch");
+
+    Serial.println("[net] WiFiManager autoConnect starting...");
+    bool connected = wm.autoConnect(SETUP_AP_NAME);
+    if (connected) {
+        Serial.printf("[net] connected to %s\n", WiFi.SSID().c_str());
+    } else {
+        Serial.println("[net] WiFiManager timed out — rebooting");
+        ESP.restart();
+    }
     s_lastReconnectAttempt = millis();
 }
 
@@ -34,12 +57,28 @@ void net_loop() {
         }
         return;
     }
-    printed_ip = false;  // reset so we re-print after reconnect
+    printed_ip = false;
     if (millis() - s_lastReconnectAttempt < RECONNECT_INTERVAL_MS) return;
     Serial.println("[net] reconnecting...");
     WiFi.disconnect();
-    WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+    WiFi.reconnect();
     s_lastReconnectAttempt = millis();
+}
+
+void net_startConfigPortal() {
+    Serial.println("[net] starting config portal on demand");
+    wm.setConfigPortalTimeout(SETUP_PORTAL_TIMEOUT_SEC);
+    // resetSettings clears saved credentials so the portal opens fresh.
+    wm.resetSettings();
+    // startConfigPortal blocks until the user submits credentials or
+    // the timeout elapses. On success WiFi connects automatically.
+    bool ok = wm.startConfigPortal(SETUP_AP_NAME);
+    if (ok) {
+        Serial.printf("[net] reconfigured — connected to %s\n", WiFi.SSID().c_str());
+    } else {
+        Serial.println("[net] portal timed out — rebooting");
+        ESP.restart();
+    }
 }
 
 void net_syncTime() {

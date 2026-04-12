@@ -64,13 +64,39 @@ void net_begin() {
         if (creds[i].valid) { hasNetworks = true; break; }
     }
 
-    if (hasNetworks) {
-        // Try connecting to any of the saved networks.
-        Serial.println("[net] trying saved networks...");
+    if (!hasNetworks) {
+        // No credentials in our NVS slots. Check if the old WiFiManager
+        // left credentials in the ESP32 WiFi NVS (from a previous firmware).
+        // WiFi.begin() with no args uses whatever is in NVS from the last
+        // successful connection.
+        Serial.println("[net] no saved networks — trying ESP32 NVS fallback");
+        WiFi.begin();
         uint32_t start = millis();
-        while (wifiMulti.run() != WL_CONNECTED &&
+        while (WiFi.status() != WL_CONNECTED &&
                millis() - start < WIFI_CONNECT_TIMEOUT_SEC * 1000) {
             delay(500);
+        }
+        if (WiFi.status() == WL_CONNECTED) {
+            // Migrate the working credentials into our slot storage.
+            String ssid = WiFi.SSID();
+            String psk  = WiFi.psk();
+            if (ssid.length() > 0) {
+                settings_addWifi(ssid.c_str(), psk.c_str());
+                Serial.printf("[net] migrated from ESP32 NVS: %s\n", ssid.c_str());
+                hasNetworks = true;
+            }
+        }
+    }
+
+    if (hasNetworks) {
+        if (WiFi.status() != WL_CONNECTED) {
+            // Try connecting to any of the saved networks.
+            Serial.println("[net] trying saved networks...");
+            uint32_t start = millis();
+            while (wifiMulti.run() != WL_CONNECTED &&
+                   millis() - start < WIFI_CONNECT_TIMEOUT_SEC * 1000) {
+                delay(500);
+            }
         }
     }
 

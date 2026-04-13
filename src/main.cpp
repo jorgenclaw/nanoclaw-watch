@@ -42,6 +42,7 @@ static uint32_t g_lastNotifPollMs = 0;
 static char     g_lastNotifTimestamp[32] = "1970-01-01T00:00:00.000Z";
 static WatchNotification g_notifBuf[3];
 static bool g_powerKeyPressed = false;
+static bool g_dimMode = false;
 // Set to true by the recording loop's direct touch poll (or as a fallback
 // by onSpeakButtonPressed via the LVGL CLICK path) when the user taps the
 // SEND zone of the speak button while recording. doVoiceCapture() breaks
@@ -58,7 +59,8 @@ static void doQuickPrompt(int idx);
 static void doPoll();
 static void doNotifPoll();
 static void doWeatherFetch();
-static void enterLightSleep();
+static void enterDimMode();
+static void exitDimMode();
 
 // =============================================================================
 // Device event handler — fires from instance.loop() on hardware interrupts
@@ -159,20 +161,7 @@ void onSleepButtonPressed() {
     if (currentState() != STATE_HOME) return;
     Serial.println("[ui] sleep button pressed");
     instance.vibrator();
-    // CRITICAL: wait for the user's finger to leave the screen before
-    // entering light sleep. WAKEUP_SRC_TOUCH_PANEL fires on any active
-    // touch — if we sleep while the finger is still down, the panel
-    // wakes the chip back up within milliseconds. Poll the touch chip
-    // until it reports 0 points (or 3 sec safety timeout).
-    int16_t tx = 0, ty = 0;
-    uint32_t wait_start = millis();
-    while (instance.getPoint(&tx, &ty, 1) > 0 &&
-           millis() - wait_start < 3000) {
-        delay(10);
-    }
-    delay(150);  // extra debounce so the touch IRQ has settled
-    Serial.println("[ui] finger released, entering sleep");
-    enterLightSleep();
+    enterDimMode();
 }
 
 // The newest notification is cached in g_notifBuf[latest] by doNotifPoll,
@@ -561,6 +550,9 @@ static void doNotifPoll() {
     WatchNotification& newest = g_notifBuf[g_latestNotifIdx];
     ui_showNotifBanner(newest.from, newest.preview, newest.full_text);
 
+    // Wake the screen if dimmed — notifications should be visible.
+    if (g_dimMode) exitDimMode();
+
     // Double-buzz notification pattern (distinct from single confirmation buzz).
     instance.vibrator();
     delay(150);
@@ -590,27 +582,24 @@ static void configureMotionWake() {
     instance.sensor.enablePedometer();
 }
 
-static void enterLightSleep() {
-    Serial.println("[main] entering light sleep");
-    // WAKEUP_SRC_SENSOR is deliberately OMITTED. We tried re-enabling it
-    // for tilt-to-wake on 2026-04-10 and confirmed via serial trace that
-    // the BMA423 fires its sensor wakeup IRQ within milliseconds of
-    // entering sleep — same-second wake-up, screen never visibly dims,
-    // user perceives "sleep doesn't work". The simple "just turn it on"
-    // approach does NOT work no matter how we filter the events on the
-    // wake side.
-    //
-    // The path forward for tilt-to-wake (filed in project memory) is to
-    // use BMA423's dedicated BMA4_WRIST_WEAR_WAKE_UP interrupt (a different
-    // sensor feature than generic motion wakeup), which fires only on a
-    // deliberate wrist-raise gesture instead of any vibration. That
-    // requires investigating the LilyGo SensorBMA423 wrapper API to find
-    // the right enable call. Until then, wake on power key + touch only.
-    instance.lightSleep((WakeupSource_t)(WAKEUP_SRC_POWER_KEY |
-                                         WAKEUP_SRC_TOUCH_PANEL));
-    Serial.println("[main] woke from light sleep");
-    touchInteraction();
+// Dim mode: backlight to minimum but CPU stays running. This keeps
+// notification polling, wake word detection, and timers alive while
+// appearing "off" to the user. A touch or power key press wakes it.
+// If battery life is unacceptable, switch to option 2: periodic light
+// sleep with timer wakeup (see project memory).
+static void enterDimMode() {
+    if (g_dimMode) return;
+    Serial.println("[main] entering dim mode");
+    instance.setBrightness(BRIGHTNESS_DIM);
+    g_dimMode = true;
+}
+
+static void exitDimMode() {
+    if (!g_dimMode) return;
+    Serial.println("[main] exiting dim mode");
     instance.setBrightness(BRIGHTNESS_ACTIVE);
+    g_dimMode = false;
+    touchInteraction();
 }
 
 // =============================================================================
@@ -717,10 +706,23 @@ void loop() {
         }
     }
 
-    // Handle queued power-key sleep request
+    // Handle power key: toggle dim mode.
     if (g_powerKeyPressed) {
         g_powerKeyPressed = false;
-        enterLightSleep();
+        if (g_dimMode) {
+            exitDimMode();
+        } else {
+            enterDimMode();
+        }
+    }
+
+    // Wake from dim mode on any touch. The LVGL touch driver fires
+    // continuously while a finger is down, so we detect it here.
+    if (g_dimMode) {
+        int16_t tx, ty;
+        if (instance.getPoint(&tx, &ty, 1) > 0) {
+            exitDimMode();
+        }
     }
 
     // Diagnostic: print idle progress every 5 sec while in HOME state.
@@ -749,7 +751,7 @@ void loop() {
     if (currentState() == STATE_HOME &&
         millis() - lastInteractionMs() > IDLE_SLEEP_MS) {
         if (!ui_timerIsRunning() && !ui_alarmIsImminent(60)) {
-            enterLightSleep();
+            enterDimMode();
         }
     }
 

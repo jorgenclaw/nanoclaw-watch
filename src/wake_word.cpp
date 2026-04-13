@@ -92,7 +92,7 @@ void wake_word_preallocate() {
 // on T-Watch PDM audio instead of the typical 0.90+. We require TWO
 // consecutive windows above threshold to suppress false positives from
 // the lower threshold.
-#define WAKE_WORD_THRESHOLD     0.40f
+#define WAKE_WORD_THRESHOLD     0.55f
 
 // Task stack — Edge Impulse inference needs plenty of headroom.
 #define WAKE_WORD_STACK_BYTES   16384

@@ -96,6 +96,20 @@ bool ui_notifBannerVisible();
 // Notification detail screen — full text, scrollable, back button.
 void ui_showNotifDetail(const char* from, const char* full_text);
 
+// --- DND (Do Not Disturb) ---
+void ui_showDnd();
+void ui_showDndCustom();
+
+// --- Pomodoro ---
+void ui_showPomodoro();
+
+// True if a pomodoro is currently running (work or rest phase).
+// Main loop uses this alongside ui_timerIsRunning() to suppress auto-sleep.
+bool ui_pomodoroIsRunning();
+
+// --- Battery detail ---
+void ui_showBatteryDetail();
+
 // Callbacks fired by UI buttons. Defined in main.cpp.
 extern void onSpeakButtonPressed();
 extern void onQuickPromptPressed(int idx);   // idx = 0..3

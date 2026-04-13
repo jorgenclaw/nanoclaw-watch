@@ -43,3 +43,12 @@ void settings_addWifi(const char* ssid, const char* password);
 
 // Clear all saved WiFi networks.
 void settings_clearAllWifi();
+
+// --- Last notification timestamp (NVS-persisted across reboots) ---------------
+
+// Returns the last-polled notification timestamp (ISO 8601). Falls back to
+// "1970-01-01T00:00:00.000Z" on first boot / missing key.
+const char* settings_getLastNotifTimestamp();
+
+// Persist a new high-water mark for notification polling.
+void settings_setLastNotifTimestamp(const char* ts);

@@ -16,7 +16,7 @@
 
 // --- WiFi provisioning ---
 #define SETUP_AP_NAME           "Jorgenclaw-Setup"
-#define SETUP_PORTAL_TIMEOUT_SEC 120   // auto-reboot if nobody configures
+#define SETUP_PORTAL_TIMEOUT_SEC  60   // auto-reboot if nobody configures
 #define WIFI_CONNECT_TIMEOUT_SEC  15   // seconds before falling back to portal
 
 // --- NanoClaw host endpoint ---
@@ -37,7 +37,7 @@
 // Tap the speak button to START recording. Tap it again to STOP and send.
 // If the user doesn't tap again within this many seconds, the recording
 // auto-sends (runaway safety cap).
-#define VOICE_RECORD_MAX_SECONDS 30
+#define VOICE_RECORD_MAX_SECONDS 60
 // I2S read chunk size in bytes. Smaller = more responsive to the stop tap,
 // larger = less CPU overhead. 4096 bytes @ 16 kHz / 16-bit mono = 128 ms of
 // audio per read, so the stop-tap has ~128 ms worst-case latency.

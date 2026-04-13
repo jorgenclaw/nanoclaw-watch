@@ -15,6 +15,10 @@ enum WatchState {
     STATE_CLOCK,       // clock sub-screen (alarm/timer/stopwatch)
     STATE_WEATHER,     // weather sub-screen (current + forecast + units)
     STATE_NOTIFICATION,// notification detail (full text, scrollable)
+    STATE_DND,         // Do Not Disturb submenu
+    STATE_DND_CUSTOM,  // DND custom duration picker (sub-sub-screen)
+    STATE_BATTERY,     // battery/system info detail screen
+    STATE_POMODORO,    // Pomodoro timer (work/rest cycles)
     STATE_ERROR        // generic error display
 };
 

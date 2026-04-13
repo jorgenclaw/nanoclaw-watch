@@ -7,6 +7,7 @@
 #include <LilyGoLib.h>
 #include <LV_Helper.h>
 #include <time.h>
+#include <esp_heap_caps.h>
 
 // =============================================================================
 // LVGL UI for NanoClaw Watch
@@ -27,17 +28,25 @@ static lv_obj_t* lbl_time         = nullptr;
 static lv_obj_t* lbl_date         = nullptr;
 static lv_obj_t* lbl_battery      = nullptr;
 static lv_obj_t* lbl_wifi         = nullptr;
-static lv_obj_t* lbl_steps        = nullptr;  // inner label of quick_btns[2] (Steps button)
-static lv_obj_t* lbl_weather      = nullptr;  // inner label of quick_btns[3] (Weather button)
+static lv_obj_t* lbl_weather      = nullptr;  // inner label of grid button 3 (Weather)
 static lv_obj_t* speak_btn        = nullptr;
 static lv_obj_t* speak_lbl        = nullptr;  // the label *inside* the speak button — primary indicator
 static lv_obj_t* cancel_lbl       = nullptr;  // left-half "X Cancel" label, only visible during recording
 static lv_obj_t* send_lbl         = nullptr;  // right-half "0:00 Send" label, only visible during recording
-static lv_obj_t* quick_btns[4]    = {nullptr, nullptr, nullptr, nullptr};
-static lv_obj_t* sleep_btn        = nullptr;  // pinned bottom-edge full-width Sleep button
+static const int GRID_COUNT = 12;
+static lv_obj_t* grid_btns[GRID_COUNT] = {};
+static lv_obj_t* grid_container   = nullptr;  // scrollable button grid
 
 // Clock sub-screen (loaded when user taps the Clock quick button — slot 1).
 static lv_obj_t* clock_screen     = nullptr;
+
+// DND sub-screen
+static lv_obj_t* dnd_screen       = nullptr;
+static lv_obj_t* dnd_status_lbl   = nullptr;
+
+// Battery detail sub-screen
+static lv_obj_t* battery_screen   = nullptr;
+static lv_obj_t* bat_info_lbl     = nullptr;
 
 // Weather sub-screen (loaded when user taps the Weather quick button — slot 3).
 static lv_obj_t* weather_screen   = nullptr;
@@ -111,11 +120,19 @@ static const uint32_t STEPS_CONFIRM_TIMEOUT_MS = 3000;
 // Response screen widgets
 static lv_obj_t* response_text    = nullptr;
 
-static const char* QUICK_LABELS[4] = {
-    "Today?",
-    "Clock",          // index 1 — opens the clock sub-screen
-    "0 steps",        // index 2 — live BMA423 pedometer count, tap-twice to reset
-    "Weather...",     // index 3 — wttr.in fetch, refreshes on tap (initial pending)
+static const char* GRID_LABELS[GRID_COUNT] = {
+    "DND",             // 0 — Do Not Disturb (submenu for time selection)
+    "Clock",           // 1 — clock sub-screen (alarm/timer/stopwatch/pomodoro)
+    "Flashlight",      // 2 — white -> tap -> red -> tap -> home
+    "Weather...",      // 3 — wttr.in weather sub-screen
+    "Network",         // 4 — WiFi info (SSID, IP, signal, saved networks)
+    "Inbox",           // 5 — unread email summary (pushed by Jorgenclaw)
+    "Find Phone",      // 6 — ping Scott's phone via Jorgenclaw
+    "Next Event",      // 7 — next calendar event (once protond works)
+    "Clicker",         // 8 — presentation slide advancer via BLE HID
+    "Status",          // 9 — NanoClaw host status (reachable, uptime)
+    "Spotify",         // 10 — music control (stub)
+    "Screen Test",     // 11 — RGB cycle for display health check (stub)
 };
 
 // --- Event callbacks ---
@@ -133,13 +150,6 @@ static void quick_event_cb(lv_event_t* e) {
     Serial.printf("[ui] quick_event_cb CLICKED idx=%d\n", idx);
     touchInteraction();
     onQuickPromptPressed(idx);
-}
-
-static void sleep_event_cb(lv_event_t* e) {
-    if (lv_event_get_code(e) != LV_EVENT_CLICKED) return;
-    Serial.println("[ui] sleep_event_cb CLICKED");
-    touchInteraction();
-    onSleepButtonPressed();
 }
 
 static void response_dismiss_cb(lv_event_t* e) {
@@ -162,35 +172,42 @@ static void build_home_screen() {
     lv_obj_clear_flag(home_screen, LV_OBJ_FLAG_SCROLLABLE);
 
     // Top status bar — battery + WiFi
+    // Top status bar — labels positioned directly on home_screen so
+    // they don't move when touch overlay sizes change.
     lbl_battery = lv_label_create(home_screen);
     lv_label_set_text(lbl_battery, "BAT --%");
     lv_obj_set_style_text_font(lbl_battery, &lv_font_montserrat_14, 0);
     lv_obj_align(lbl_battery, LV_ALIGN_TOP_LEFT, 8, 6);
 
-    // WiFi label — wrapped in a clickable object so long-press opens the
-    // WiFi config portal (captive AP for changing networks without USB).
+    lbl_wifi = lv_label_create(home_screen);
+    lv_label_set_text(lbl_wifi, "WiFi -");
+    lv_obj_set_style_text_font(lbl_wifi, &lv_font_montserrat_14, 0);
+    lv_obj_align(lbl_wifi, LV_ALIGN_TOP_RIGHT, -8, 6);
+
+    // Invisible touch overlays for long-press actions. These sit on top
+    // of the labels but don't parent them, so label positioning is clean.
+    lv_obj_t* bat_btn = lv_obj_create(home_screen);
+    lv_obj_remove_style_all(bat_btn);
+    lv_obj_set_size(bat_btn, 120, 36);
+    lv_obj_align(bat_btn, LV_ALIGN_TOP_LEFT, 0, 0);
+    lv_obj_add_flag(bat_btn, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_clear_flag(bat_btn, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_event_cb(bat_btn, [](lv_event_t* e) {
+        touchInteraction();
+        setState(STATE_BATTERY);
+        ui_showBatteryDetail();
+    }, LV_EVENT_LONG_PRESSED, NULL);
+
     lv_obj_t* wifi_btn = lv_obj_create(home_screen);
     lv_obj_remove_style_all(wifi_btn);
-    lv_obj_set_size(wifi_btn, 80, 24);
-    lv_obj_align(wifi_btn, LV_ALIGN_TOP_RIGHT, -2, 2);
+    lv_obj_set_size(wifi_btn, 120, 36);
+    lv_obj_align(wifi_btn, LV_ALIGN_TOP_RIGHT, 0, 0);
     lv_obj_add_flag(wifi_btn, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_clear_flag(wifi_btn, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_add_event_cb(wifi_btn, [](lv_event_t* e) {
-        // Declared in main.cpp — triggers net_startConfigPortal.
         extern void onWifiLongPress();
         onWifiLongPress();
     }, LV_EVENT_LONG_PRESSED, NULL);
-
-    lbl_wifi = lv_label_create(wifi_btn);
-    lv_label_set_text(lbl_wifi, "WiFi -");
-    lv_obj_set_style_text_font(lbl_wifi, &lv_font_montserrat_14, 0);
-    lv_obj_align(lbl_wifi, LV_ALIGN_CENTER, 0, 0);
-
-    // Step counter used to live in the top bar center, but it moved into the
-    // quick-button grid (slot 2 — bottom-left) so it's a tap target that
-    // resets the pedometer on tap. The lbl_steps pointer below gets
-    // assigned later inside the quick-button loop. See onQuickPromptPressed
-    // in main.cpp for the reset handler.
 
     // Clock — large
     lbl_time = lv_label_create(home_screen);
@@ -252,76 +269,49 @@ static void build_home_screen() {
     lv_obj_align(send_lbl, LV_ALIGN_RIGHT_MID, -10, 0);
     lv_obj_add_flag(send_lbl, LV_OBJ_FLAG_HIDDEN);
 
-    // (Bottom status line removed — error / "No speech" feedback is now
-    // shown directly on the speak button label, freeing the bottom edge of
-    // the screen for the pinned Sleep button below.)
+    // Scrollable button grid — 2 columns, 6 rows (12 buttons total).
+    // The first 4 buttons (2x2) are visible without scrolling; the rest
+    // are revealed by swiping up. Larger buttons than the old 2x2 grid.
+    grid_container = lv_obj_create(home_screen);
+    lv_obj_remove_style_all(grid_container);
+    lv_obj_set_size(grid_container, 236, 100);  // visible height = 2 rows
+    lv_obj_align(grid_container, LV_ALIGN_TOP_MID, 0, 138);
+    lv_obj_set_style_bg_opa(grid_container, LV_OPA_TRANSP, 0);
+    lv_obj_add_flag(grid_container, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_scroll_dir(grid_container, LV_DIR_VER);
+    lv_obj_set_style_pad_all(grid_container, 0, 0);
+    // Snap scrolling so rows don't stop half-visible.
+    lv_obj_set_scroll_snap_y(grid_container, LV_SCROLL_SNAP_START);
 
-    // Quick-tap preset row (2x2 grid). Layout from top:
-    //   speak_btn   y= 88-132   (180x44, center -10)
-    //   row 0        y=140-168  (90x28)
-    //   row 1        y=174-202  (90x28)
-    //   sleep_btn   y=210-238   (200x28, pinned bottom)
-    // The 8 px gap between row 1 and the sleep button is the visible
-    // separation Scott asked for; previously they touched/overlapped.
-    int btn_w = 90, btn_h = 28;
-    int spacing = 6;
-    int row_y = 140;
-    int cols[2] = { -btn_w/2 - spacing/2, btn_w/2 + spacing/2 };
-    for (int i = 0; i < 4; i++) {
+    const int btn_w = 112, btn_h = 44;
+    const int gap = 6;
+    for (int i = 0; i < GRID_COUNT; i++) {
         int row = i / 2;
         int col = i % 2;
-        quick_btns[i] = lv_button_create(home_screen);
-        lv_obj_set_size(quick_btns[i], btn_w, btn_h);
-        lv_obj_align(quick_btns[i], LV_ALIGN_TOP_MID, cols[col], row_y + row * (btn_h + spacing));
-        lv_obj_set_style_bg_color(quick_btns[i], lv_color_hex(0x222222), 0);
-        lv_obj_set_style_radius(quick_btns[i], 6, 0);
-        lv_obj_add_event_cb(quick_btns[i], quick_event_cb, LV_EVENT_ALL, (void*)(intptr_t)i);
-        lv_obj_t* lbl = lv_label_create(quick_btns[i]);
-        lv_label_set_text(lbl, QUICK_LABELS[i]);
-        lv_obj_set_style_text_font(lbl, &lv_font_montserrat_12, 0);
-        lv_obj_center(lbl);
-        // Slot 2 (bottom-left) is the Steps button. Stash a reference to its
-        // inner label so update_battery() can refresh the step count each
-        // tick without looking the widget up again. Tap handling is in
-        // main.cpp::onQuickPromptPressed (which calls resetPedometer).
-        if (i == 2) {
-            lbl_steps = lbl;
-        }
-        // Slot 3 (bottom-right) is the Weather button. Stash its label so
-        // ui_setWeather() can update the temp/UV display when the network
-        // fetch returns.
-        if (i == 3) {
-            lbl_weather = lbl;
-        }
-    }
+        int x = col * (btn_w + gap);
+        int y = row * (btn_h + gap);
 
-    // Pinned Sleep button — sits at the very bottom edge of the screen,
-    // outside the quick-button grid. Wider than a grid button so it's an
-    // easy single-tap target. Uses a plain lv_obj (not lv_button) for the
-    // same reason the speak button does — themed buttons override our
-    // local bg_color setting.
-    sleep_btn = lv_obj_create(home_screen);
-    lv_obj_remove_style_all(sleep_btn);
-    lv_obj_set_size(sleep_btn, 200, 28);
-    lv_obj_align(sleep_btn, LV_ALIGN_BOTTOM_MID, 0, -2);
-    lv_obj_set_style_bg_opa(sleep_btn, LV_OPA_COVER, 0);
-    lv_obj_set_style_bg_color(sleep_btn, lv_color_hex(0x222222), 0);
-    lv_obj_set_style_radius(sleep_btn, 8, 0);
-    lv_obj_set_style_border_width(sleep_btn, 0, 0);
-    lv_obj_set_style_pad_all(sleep_btn, 0, 0);
-    lv_obj_add_flag(sleep_btn, LV_OBJ_FLAG_CLICKABLE);
-    lv_obj_clear_flag(sleep_btn, LV_OBJ_FLAG_SCROLLABLE);
-    // Extend the click area 8 px in every direction so taps that land just
-    // outside the visible button still register. Helps because the watch's
-    // round display clips the bottom-edge corners and the touch panel can
-    // be finicky there.
-    lv_obj_set_ext_click_area(sleep_btn, 8);
-    lv_obj_add_event_cb(sleep_btn, sleep_event_cb, LV_EVENT_CLICKED, NULL);
-    lv_obj_t* sleep_lbl = lv_label_create(sleep_btn);
-    lv_label_set_text(sleep_lbl, "Sleep");
-    lv_obj_set_style_text_font(sleep_lbl, &lv_font_montserrat_14, 0);
-    lv_obj_set_style_text_color(sleep_lbl, lv_color_hex(0xE8E8E8), 0);
-    lv_obj_center(sleep_lbl);
+        grid_btns[i] = lv_obj_create(grid_container);
+        lv_obj_remove_style_all(grid_btns[i]);
+        lv_obj_set_size(grid_btns[i], btn_w, btn_h);
+        lv_obj_set_pos(grid_btns[i], x, y);
+        lv_obj_set_style_bg_opa(grid_btns[i], LV_OPA_COVER, 0);
+        lv_obj_set_style_bg_color(grid_btns[i], lv_color_hex(0x222222), 0);
+        lv_obj_set_style_radius(grid_btns[i], 10, 0);
+        lv_obj_add_flag(grid_btns[i], LV_OBJ_FLAG_CLICKABLE);
+        lv_obj_clear_flag(grid_btns[i], LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_add_event_cb(grid_btns[i], quick_event_cb, LV_EVENT_CLICKED,
+                            (void*)(intptr_t)i);
+
+        lv_obj_t* lbl = lv_label_create(grid_btns[i]);
+        lv_label_set_text(lbl, GRID_LABELS[i]);
+        lv_obj_set_style_text_font(lbl, &lv_font_montserrat_14, 0);
+        lv_obj_set_style_text_color(lbl, lv_color_hex(0xE8E8E8), 0);
+        lv_obj_center(lbl);
+
+        // Stash Weather button label for live updates.
+        if (i == 3) lbl_weather = lbl;
+    }
 }
 
 static void build_response_screen() {
@@ -395,6 +385,7 @@ static void clock_stub_cb(lv_event_t* e) {
         case 0: ui_showAlarm();     break;
         case 1: ui_showTimer();     break;
         case 2: ui_showStopwatch(); break;
+        case 3: ui_showPomodoro(); break;
     }
 }
 
@@ -426,15 +417,16 @@ static void build_clock_screen() {
     lv_obj_set_style_text_color(close_lbl, lv_color_hex(0xE8E8E8), 0);
     lv_obj_center(close_lbl);
 
-    // Three action buttons stacked vertically — each loads a sub-sub-screen
+    // Four action buttons stacked vertically — each loads a sub-sub-screen
     // (Alarm/Timer/Stopwatch) via clock_stub_cb dispatching on the index
-    // passed as user_data. Buttons are wide (200x42) for easy tapping.
-    const char* labels[3] = { "Alarm", "Timer", "Stopwatch" };
-    for (int i = 0; i < 3; i++) {
+    // passed as user_data. Pomodoro (idx 3) is a stub for now.
+    // Buttons are wide (200x38) for easy tapping, tighter spacing to fit 4.
+    const char* labels[4] = { "Alarm", "Timer", "Stopwatch", "Pomodoro" };
+    for (int i = 0; i < 4; i++) {
         lv_obj_t* btn = lv_obj_create(clock_screen);
         lv_obj_remove_style_all(btn);
-        lv_obj_set_size(btn, 200, 42);
-        lv_obj_align(btn, LV_ALIGN_TOP_MID, 0, 60 + i * 52);
+        lv_obj_set_size(btn, 200, 38);
+        lv_obj_align(btn, LV_ALIGN_TOP_MID, 0, 52 + i * 46);
         lv_obj_set_style_bg_opa(btn, LV_OPA_COVER, 0);
         lv_obj_set_style_bg_color(btn, lv_color_hex(0x222222), 0);
         lv_obj_set_style_radius(btn, 10, 0);
@@ -1113,7 +1105,572 @@ void ui_showWeather() {
 }
 
 // =============================================================================
+// Pomodoro timer
+// =============================================================================
+
+static lv_obj_t* pomodoro_screen     = nullptr;
+static lv_obj_t* pom_time_lbl        = nullptr;
+static lv_obj_t* pom_phase_lbl       = nullptr;
+static lv_obj_t* pom_start_lbl       = nullptr;
+static lv_obj_t* pom_work_val_lbl    = nullptr;
+static lv_obj_t* pom_rest_val_lbl    = nullptr;
+
+static bool      g_pomRunning        = false;
+static int       g_pomWorkMin        = 25;
+static int       g_pomRestMin        = 5;
+enum PomPhase { POM_WORK, POM_REST };
+static PomPhase  g_pomPhase          = POM_WORK;
+static uint32_t  g_pomPhaseEndMs     = 0;
+
+static void pom_update_picker() {
+    if (pom_work_val_lbl) {
+        char buf[4];
+        snprintf(buf, sizeof(buf), "%d", g_pomWorkMin);
+        lv_label_set_text(pom_work_val_lbl, buf);
+    }
+    if (pom_rest_val_lbl) {
+        char buf[4];
+        snprintf(buf, sizeof(buf), "%d", g_pomRestMin);
+        lv_label_set_text(pom_rest_val_lbl, buf);
+    }
+}
+
+static void pom_update_display() {
+    if (!pom_time_lbl) return;
+    if (!g_pomRunning) {
+        lv_label_set_text(pom_time_lbl, "--:--");
+        if (pom_phase_lbl) lv_label_set_text(pom_phase_lbl, "Ready");
+        return;
+    }
+    uint32_t now = millis();
+    int remaining_sec = 0;
+    if (now < g_pomPhaseEndMs) {
+        remaining_sec = (g_pomPhaseEndMs - now) / 1000;
+    }
+    int m = remaining_sec / 60;
+    int s = remaining_sec % 60;
+    char buf[16];
+    snprintf(buf, sizeof(buf), "%02d:%02d", m, s);
+    lv_label_set_text(pom_time_lbl, buf);
+
+    if (pom_phase_lbl) {
+        lv_label_set_text(pom_phase_lbl,
+                          g_pomPhase == POM_WORK ? "WORK" : "REST");
+        lv_obj_set_style_text_color(pom_phase_lbl,
+            lv_color_hex(g_pomPhase == POM_WORK ? 0xEF4444 : 0x22C55E), 0);
+    }
+    lv_obj_invalidate(pom_time_lbl);
+}
+
+// Called from ui_clockTick() every second
+static void pom_tick() {
+    if (!g_pomRunning) return;
+    uint32_t now = millis();
+    if (now >= g_pomPhaseEndMs) {
+        // Phase transition
+        Serial.printf("[pom] phase %s ended\n",
+                      g_pomPhase == POM_WORK ? "WORK" : "REST");
+        // 3 short buzzes
+        for (int i = 0; i < 3; i++) {
+            instance.vibrator();
+            delay(200);
+        }
+        if (g_pomPhase == POM_WORK) {
+            g_pomPhase = POM_REST;
+            g_pomPhaseEndMs = millis() + (uint32_t)g_pomRestMin * 60000UL;
+        } else {
+            g_pomPhase = POM_WORK;
+            g_pomPhaseEndMs = millis() + (uint32_t)g_pomWorkMin * 60000UL;
+        }
+    }
+    pom_update_display();
+}
+
+static void pom_close_cb(lv_event_t* e) {
+    if (lv_event_get_code(e) != LV_EVENT_CLICKED) return;
+    touchInteraction();
+    // Stop the pomodoro when closing
+    g_pomRunning = false;
+    setState(STATE_CLOCK);
+    ui_showClock();
+}
+
+static void pom_work_minus_cb(lv_event_t* e) {
+    if (lv_event_get_code(e) != LV_EVENT_CLICKED) return;
+    touchInteraction();
+    if (g_pomRunning) return;
+    if (g_pomWorkMin > 5) g_pomWorkMin -= 5;
+    pom_update_picker();
+    lv_refr_now(NULL);
+}
+
+static void pom_work_plus_cb(lv_event_t* e) {
+    if (lv_event_get_code(e) != LV_EVENT_CLICKED) return;
+    touchInteraction();
+    if (g_pomRunning) return;
+    if (g_pomWorkMin < 60) g_pomWorkMin += 5;
+    pom_update_picker();
+    lv_refr_now(NULL);
+}
+
+static void pom_rest_minus_cb(lv_event_t* e) {
+    if (lv_event_get_code(e) != LV_EVENT_CLICKED) return;
+    touchInteraction();
+    if (g_pomRunning) return;
+    if (g_pomRestMin > 5) g_pomRestMin -= 5;
+    pom_update_picker();
+    lv_refr_now(NULL);
+}
+
+static void pom_rest_plus_cb(lv_event_t* e) {
+    if (lv_event_get_code(e) != LV_EVENT_CLICKED) return;
+    touchInteraction();
+    if (g_pomRunning) return;
+    if (g_pomRestMin < 60) g_pomRestMin += 5;
+    pom_update_picker();
+    lv_refr_now(NULL);
+}
+
+static void pom_start_stop_cb(lv_event_t* e) {
+    if (lv_event_get_code(e) != LV_EVENT_CLICKED) return;
+    touchInteraction();
+    if (g_pomRunning) {
+        g_pomRunning = false;
+        if (pom_start_lbl) lv_label_set_text(pom_start_lbl, "Start");
+    } else {
+        g_pomRunning = true;
+        g_pomPhase = POM_WORK;
+        g_pomPhaseEndMs = millis() + (uint32_t)g_pomWorkMin * 60000UL;
+        if (pom_start_lbl) lv_label_set_text(pom_start_lbl, "Stop");
+    }
+    pom_update_display();
+    lv_refr_now(NULL);
+}
+
+static void build_pomodoro_screen() {
+    pomodoro_screen = lv_obj_create(NULL);
+    lv_obj_set_style_bg_color(pomodoro_screen, lv_color_hex(0x000000), 0);
+    lv_obj_set_style_text_color(pomodoro_screen, lv_color_hex(0xE8E8E8), 0);
+    lv_obj_clear_flag(pomodoro_screen, LV_OBJ_FLAG_SCROLLABLE);
+
+    make_title(pomodoro_screen, "Pomodoro");
+    make_close_btn(pomodoro_screen, pom_close_cb);
+
+    // Phase label (WORK / REST / Ready)
+    pom_phase_lbl = lv_label_create(pomodoro_screen);
+    lv_label_set_text(pom_phase_lbl, "Ready");
+    lv_obj_set_style_text_font(pom_phase_lbl, &lv_font_montserrat_14, 0);
+    lv_obj_align(pom_phase_lbl, LV_ALIGN_TOP_MID, 0, 40);
+
+    // Big countdown
+    pom_time_lbl = lv_label_create(pomodoro_screen);
+    lv_label_set_text(pom_time_lbl, "--:--");
+    lv_obj_set_style_text_font(pom_time_lbl, &lv_font_montserrat_48, 0);
+    lv_obj_align(pom_time_lbl, LV_ALIGN_TOP_MID, 0, 56);
+
+    // Work row: "Work: [-] 25 [+] min"
+    lv_obj_t* w_lbl = lv_label_create(pomodoro_screen);
+    lv_label_set_text(w_lbl, "Work:");
+    lv_obj_set_style_text_font(w_lbl, &lv_font_montserrat_14, 0);
+    lv_obj_align(w_lbl, LV_ALIGN_TOP_LEFT, 12, 118);
+
+    make_picker_btn(pomodoro_screen, "-", 10, 8, pom_work_minus_cb);
+
+    pom_work_val_lbl = lv_label_create(pomodoro_screen);
+    lv_label_set_text(pom_work_val_lbl, "25");
+    lv_obj_set_style_text_font(pom_work_val_lbl, &lv_font_montserrat_18, 0);
+    lv_obj_align(pom_work_val_lbl, LV_ALIGN_CENTER, 48, 8);
+
+    make_picker_btn(pomodoro_screen, "+", 82, 8, pom_work_plus_cb);
+
+    lv_obj_t* w_unit = lv_label_create(pomodoro_screen);
+    lv_label_set_text(w_unit, "min");
+    lv_obj_set_style_text_font(w_unit, &lv_font_montserrat_14, 0);
+    lv_obj_align(w_unit, LV_ALIGN_CENTER, 110, 8);
+
+    // Rest row: "Rest: [-]  5 [+] min"
+    lv_obj_t* r_lbl = lv_label_create(pomodoro_screen);
+    lv_label_set_text(r_lbl, "Rest:");
+    lv_obj_set_style_text_font(r_lbl, &lv_font_montserrat_14, 0);
+    lv_obj_align(r_lbl, LV_ALIGN_TOP_LEFT, 12, 158);
+
+    make_picker_btn(pomodoro_screen, "-", 10, 48, pom_rest_minus_cb);
+
+    pom_rest_val_lbl = lv_label_create(pomodoro_screen);
+    lv_label_set_text(pom_rest_val_lbl, "5");
+    lv_obj_set_style_text_font(pom_rest_val_lbl, &lv_font_montserrat_18, 0);
+    lv_obj_align(pom_rest_val_lbl, LV_ALIGN_CENTER, 48, 48);
+
+    make_picker_btn(pomodoro_screen, "+", 82, 48, pom_rest_plus_cb);
+
+    lv_obj_t* r_unit = lv_label_create(pomodoro_screen);
+    lv_label_set_text(r_unit, "min");
+    lv_obj_set_style_text_font(r_unit, &lv_font_montserrat_14, 0);
+    lv_obj_align(r_unit, LV_ALIGN_CENTER, 110, 48);
+
+    // Start/Stop button
+    make_action_btn(pomodoro_screen, "Start", 90, 0x22C55E,
+                    pom_start_stop_cb, &pom_start_lbl);
+}
+
+// =============================================================================
 // Notification banner (overlay on lv_layer_top) + detail screen
+// =============================================================================
+
+// --- DND (Do Not Disturb) sub-screen ---
+
+// Extern: g_dndUntil lives in main.cpp, shared with the notification handler.
+extern uint32_t g_dndUntil;
+
+static void dnd_close_cb(lv_event_t* e) {
+    if (lv_event_get_code(e) != LV_EVENT_CLICKED) return;
+    touchInteraction();
+    setState(STATE_HOME);
+    ui_showHome();
+}
+
+static void dnd_update_status() {
+    if (!dnd_status_lbl) return;
+    if (g_dndUntil == 0 || millis() >= g_dndUntil) {
+        lv_label_set_text(dnd_status_lbl, "DND: Off");
+        lv_obj_set_style_text_color(dnd_status_lbl, lv_color_hex(0x888888), 0);
+    } else {
+        uint32_t remaining_ms = g_dndUntil - millis();
+        uint32_t remaining_min = remaining_ms / 60000;
+        uint32_t hours = remaining_min / 60;
+        uint32_t mins  = remaining_min % 60;
+        char buf[32];
+        snprintf(buf, sizeof(buf), "Active - %lu:%02lu remaining",
+                 (unsigned long)hours, (unsigned long)mins);
+        lv_label_set_text(dnd_status_lbl, buf);
+        lv_obj_set_style_text_color(dnd_status_lbl, lv_color_hex(0x60A5FA), 0);
+    }
+}
+
+static void dnd_set_cb(lv_event_t* e) {
+    if (lv_event_get_code(e) != LV_EVENT_CLICKED) return;
+    touchInteraction();
+    int minutes = (int)(intptr_t)lv_event_get_user_data(e);
+    if (minutes == 0) {
+        g_dndUntil = 0;
+        Serial.println("[dnd] turned off");
+    } else {
+        g_dndUntil = millis() + (uint32_t)minutes * 60000UL;
+        Serial.printf("[dnd] set for %d minutes\n", minutes);
+    }
+    instance.vibrator();
+    dnd_update_status();
+    lv_refr_now(NULL);
+}
+
+// --- DND Custom duration picker (sub-sub-screen) ---
+
+static lv_obj_t* dnd_custom_screen  = nullptr;
+static lv_obj_t* dnd_custom_h_lbl   = nullptr;
+static lv_obj_t* dnd_custom_m_lbl   = nullptr;
+static int g_dndCustomHours   = 1;
+static int g_dndCustomMinutes = 0;  // 0, 15, 30, 45
+
+static void dnd_custom_update() {
+    if (dnd_custom_h_lbl) {
+        char buf[4];
+        snprintf(buf, sizeof(buf), "%d", g_dndCustomHours);
+        lv_label_set_text(dnd_custom_h_lbl, buf);
+    }
+    if (dnd_custom_m_lbl) {
+        char buf[4];
+        snprintf(buf, sizeof(buf), "%d", g_dndCustomMinutes);
+        lv_label_set_text(dnd_custom_m_lbl, buf);
+    }
+}
+
+static void dnd_custom_close_cb(lv_event_t* e) {
+    if (lv_event_get_code(e) != LV_EVENT_CLICKED) return;
+    touchInteraction();
+    setState(STATE_DND);
+    ui_showDnd();
+}
+
+static void dnd_custom_h_minus_cb(lv_event_t* e) {
+    if (lv_event_get_code(e) != LV_EVENT_CLICKED) return;
+    touchInteraction();
+    if (g_dndCustomHours > 0) g_dndCustomHours--;
+    dnd_custom_update();
+    lv_refr_now(NULL);
+}
+
+static void dnd_custom_h_plus_cb(lv_event_t* e) {
+    if (lv_event_get_code(e) != LV_EVENT_CLICKED) return;
+    touchInteraction();
+    if (g_dndCustomHours < 8) g_dndCustomHours++;
+    dnd_custom_update();
+    lv_refr_now(NULL);
+}
+
+static void dnd_custom_m_minus_cb(lv_event_t* e) {
+    if (lv_event_get_code(e) != LV_EVENT_CLICKED) return;
+    touchInteraction();
+    g_dndCustomMinutes = (g_dndCustomMinutes + 60 - 15) % 60;
+    dnd_custom_update();
+    lv_refr_now(NULL);
+}
+
+static void dnd_custom_m_plus_cb(lv_event_t* e) {
+    if (lv_event_get_code(e) != LV_EVENT_CLICKED) return;
+    touchInteraction();
+    g_dndCustomMinutes = (g_dndCustomMinutes + 15) % 60;
+    dnd_custom_update();
+    lv_refr_now(NULL);
+}
+
+static void dnd_custom_start_cb(lv_event_t* e) {
+    if (lv_event_get_code(e) != LV_EVENT_CLICKED) return;
+    touchInteraction();
+    int total_min = g_dndCustomHours * 60 + g_dndCustomMinutes;
+    if (total_min == 0) return;  // nothing to set
+    g_dndUntil = millis() + (uint32_t)total_min * 60000UL;
+    Serial.printf("[dnd] custom set for %d minutes\n", total_min);
+    instance.vibrator();
+    setState(STATE_HOME);
+    ui_showHome();
+}
+
+static void build_dnd_custom_screen() {
+    dnd_custom_screen = lv_obj_create(NULL);
+    lv_obj_set_style_bg_color(dnd_custom_screen, lv_color_hex(0x000000), 0);
+    lv_obj_set_style_text_color(dnd_custom_screen, lv_color_hex(0xE8E8E8), 0);
+    lv_obj_clear_flag(dnd_custom_screen, LV_OBJ_FLAG_SCROLLABLE);
+
+    make_title(dnd_custom_screen, "Set DND Duration");
+    make_close_btn(dnd_custom_screen, dnd_custom_close_cb);
+
+    // Hours row: "Hours:  [-]  N  [+]"
+    lv_obj_t* h_label = lv_label_create(dnd_custom_screen);
+    lv_label_set_text(h_label, "Hours:");
+    lv_obj_set_style_text_font(h_label, &lv_font_montserrat_14, 0);
+    lv_obj_align(h_label, LV_ALIGN_TOP_LEFT, 16, 60);
+
+    make_picker_btn(dnd_custom_screen, "-", 20, -52, dnd_custom_h_minus_cb);
+    dnd_custom_h_lbl = lv_label_create(dnd_custom_screen);
+    lv_label_set_text(dnd_custom_h_lbl, "1");
+    lv_obj_set_style_text_font(dnd_custom_h_lbl, &lv_font_montserrat_18, 0);
+    lv_obj_align(dnd_custom_h_lbl, LV_ALIGN_CENTER, 60, -52);
+    make_picker_btn(dnd_custom_screen, "+", 96, -52, dnd_custom_h_plus_cb);
+
+    // Minutes row: "Minutes: [-]  N  [+]"
+    lv_obj_t* m_label = lv_label_create(dnd_custom_screen);
+    lv_label_set_text(m_label, "Minutes:");
+    lv_obj_set_style_text_font(m_label, &lv_font_montserrat_14, 0);
+    lv_obj_align(m_label, LV_ALIGN_TOP_LEFT, 16, 108);
+
+    make_picker_btn(dnd_custom_screen, "-", 20, 0, dnd_custom_m_minus_cb);
+    dnd_custom_m_lbl = lv_label_create(dnd_custom_screen);
+    lv_label_set_text(dnd_custom_m_lbl, "0");
+    lv_obj_set_style_text_font(dnd_custom_m_lbl, &lv_font_montserrat_18, 0);
+    lv_obj_align(dnd_custom_m_lbl, LV_ALIGN_CENTER, 60, 0);
+    make_picker_btn(dnd_custom_screen, "+", 96, 0, dnd_custom_m_plus_cb);
+
+    // Start DND button
+    make_action_btn(dnd_custom_screen, "Start DND", 70, 0x3B82F6,
+                    dnd_custom_start_cb, NULL);
+}
+
+// --- DND main screen (2x3 grid) ---
+
+// Callback for "Custom" button — opens the custom picker
+static void dnd_custom_btn_cb(lv_event_t* e) {
+    if (lv_event_get_code(e) != LV_EVENT_CLICKED) return;
+    touchInteraction();
+    setState(STATE_DND_CUSTOM);
+    ui_showDndCustom();
+}
+
+static void build_dnd_screen() {
+    dnd_screen = lv_obj_create(NULL);
+    lv_obj_set_style_bg_color(dnd_screen, lv_color_hex(0x000000), 0);
+    lv_obj_set_style_text_color(dnd_screen, lv_color_hex(0xE8E8E8), 0);
+    lv_obj_clear_flag(dnd_screen, LV_OBJ_FLAG_SCROLLABLE);
+
+    make_title(dnd_screen, "Do Not Disturb");
+    make_close_btn(dnd_screen, dnd_close_cb);
+
+    // Status label
+    dnd_status_lbl = lv_label_create(dnd_screen);
+    lv_obj_set_style_text_font(dnd_status_lbl, &lv_font_montserrat_14, 0);
+    lv_obj_align(dnd_status_lbl, LV_ALIGN_TOP_MID, 0, 44);
+    lv_label_set_text(dnd_status_lbl, "DND: Off");
+
+    // 2x3 grid of bigger buttons (108x44 each, 6px gap)
+    struct { const char* label; int minutes; bool is_custom; } presets[] = {
+        { "30 min",   30,  false },
+        { "1 hour",   60,  false },
+        { "2 hours",  120, false },
+        { "4 hours",  240, false },
+        { "Custom",   0,   true  },
+        { "Off",      0,   false },
+    };
+    const int btn_w = 108, btn_h = 44, gap = 6;
+    const int grid_x_start = (240 - 2 * btn_w - gap) / 2;  // center the grid
+    const int grid_y_start = 66;
+
+    for (int i = 0; i < 6; i++) {
+        int row = i / 2;
+        int col = i % 2;
+        int x = grid_x_start + col * (btn_w + gap);
+        int y = grid_y_start + row * (btn_h + gap);
+
+        uint32_t color = (presets[i].minutes == 0 && !presets[i].is_custom) ? 0x444444 : 0x222222;
+        lv_obj_t* btn = lv_obj_create(dnd_screen);
+        lv_obj_remove_style_all(btn);
+        lv_obj_set_size(btn, btn_w, btn_h);
+        lv_obj_set_pos(btn, x, y);
+        lv_obj_set_style_bg_opa(btn, LV_OPA_COVER, 0);
+        lv_obj_set_style_bg_color(btn, lv_color_hex(color), 0);
+        lv_obj_set_style_radius(btn, 10, 0);
+        lv_obj_add_flag(btn, LV_OBJ_FLAG_CLICKABLE);
+        lv_obj_clear_flag(btn, LV_OBJ_FLAG_SCROLLABLE);
+
+        if (presets[i].is_custom) {
+            lv_obj_add_event_cb(btn, dnd_custom_btn_cb, LV_EVENT_CLICKED, NULL);
+        } else {
+            lv_obj_add_event_cb(btn, dnd_set_cb, LV_EVENT_CLICKED,
+                                (void*)(intptr_t)presets[i].minutes);
+        }
+
+        lv_obj_t* lbl = lv_label_create(btn);
+        lv_label_set_text(lbl, presets[i].label);
+        lv_obj_set_style_text_font(lbl, &lv_font_montserrat_14, 0);
+        lv_obj_set_style_text_color(lbl, lv_color_hex(0xE8E8E8), 0);
+        lv_obj_center(lbl);
+    }
+}
+
+// --- Battery detail sub-screen ---
+
+static void bat_close_cb(lv_event_t* e) {
+    if (lv_event_get_code(e) != LV_EVENT_CLICKED) return;
+    touchInteraction();
+    setState(STATE_HOME);
+    ui_showHome();
+}
+
+// Battery drain rate tracking — circular buffer of {millis, percent} samples.
+// Sampled every 5 minutes from bat_update_info (called every 30 sec from
+// update_battery, but we only record a sample every BAT_SAMPLE_INTERVAL_MS).
+static const int BAT_SAMPLE_COUNT = 10;
+static const uint32_t BAT_SAMPLE_INTERVAL_MS = 300000;  // 5 minutes
+struct BatSample { uint32_t ms; int pct; };
+static BatSample s_battSamples[BAT_SAMPLE_COUNT];
+static int s_battSampleIdx   = 0;   // next write position
+static int s_battSampleCount = 0;   // total samples stored (max BAT_SAMPLE_COUNT)
+static uint32_t s_lastBatSampleMs = 0;
+
+static void bat_record_sample(int pct) {
+    uint32_t now = millis();
+    if (s_battSampleCount > 0 && (now - s_lastBatSampleMs < BAT_SAMPLE_INTERVAL_MS)) {
+        return;  // not time yet
+    }
+    s_battSamples[s_battSampleIdx] = { now, pct };
+    s_battSampleIdx = (s_battSampleIdx + 1) % BAT_SAMPLE_COUNT;
+    if (s_battSampleCount < BAT_SAMPLE_COUNT) s_battSampleCount++;
+    s_lastBatSampleMs = now;
+}
+
+// Calculate drain rate in %/hr from oldest and newest samples.
+// Returns negative value if draining, positive if charging.
+// Returns 0 if insufficient data.
+static float bat_drain_rate_pct_per_hr(bool* valid) {
+    *valid = false;
+    if (s_battSampleCount < 2) return 0.0f;
+    // Oldest sample
+    int oldest_idx = (s_battSampleCount < BAT_SAMPLE_COUNT)
+                     ? 0
+                     : s_battSampleIdx;  // wrap-around: next write pos IS the oldest
+    BatSample& oldest = s_battSamples[oldest_idx];
+    // Newest sample
+    int newest_idx = (s_battSampleIdx + BAT_SAMPLE_COUNT - 1) % BAT_SAMPLE_COUNT;
+    BatSample& newest = s_battSamples[newest_idx];
+    uint32_t dt_ms = newest.ms - oldest.ms;
+    if (dt_ms < 600000) return 0.0f;  // need at least 10 minutes of data
+    *valid = true;
+    float dt_hr = (float)dt_ms / 3600000.0f;
+    return (float)(oldest.pct - newest.pct) / dt_hr;  // positive = draining
+}
+
+static void bat_update_info() {
+    if (!bat_info_lbl) return;
+    int pct = instance.pmu.getBatteryPercent();
+    bool charging = instance.pmu.isCharging();
+    uint32_t uptime_sec = millis() / 1000;
+    uint32_t up_h = uptime_sec / 3600;
+    uint32_t up_m = (uptime_sec % 3600) / 60;
+
+    // Record sample for drain tracking
+    bat_record_sample(pct);
+
+    bool drain_valid = false;
+    float drain = bat_drain_rate_pct_per_hr(&drain_valid);
+
+    // Heap stats with health indicators and explanations.
+    size_t free_dram  = heap_caps_get_free_size(MALLOC_CAP_INTERNAL) / 1024;
+    size_t free_psram = heap_caps_get_free_size(MALLOC_CAP_SPIRAM) / 1024;
+    const char* dram_health  = free_dram > 100 ? "healthy" : free_dram > 50 ? "low" : "critical";
+    const char* psram_health = free_psram > 500 ? "healthy" : free_psram > 100 ? "low" : "critical";
+
+    char buf[400];
+    int pos = 0;
+
+    // Battery + drain section
+    pos += snprintf(buf + pos, sizeof(buf) - pos,
+                    "Battery: %d%% (%s)\n",
+                    pct, charging ? "charging" : "not charging");
+    if (drain_valid && drain > 0.01f) {
+        float remaining_hr = (float)pct / drain;
+        int rem_h = (int)remaining_hr;
+        int rem_m = (int)((remaining_hr - rem_h) * 60);
+        pos += snprintf(buf + pos, sizeof(buf) - pos,
+                        "Drain: %.1f %%/hr\n"
+                        "Est. remaining: ~%dh %02dm\n",
+                        drain, rem_h, rem_m);
+    } else if (drain_valid) {
+        pos += snprintf(buf + pos, sizeof(buf) - pos,
+                        "Drain: charging/stable\n");
+    } else {
+        pos += snprintf(buf + pos, sizeof(buf) - pos,
+                        "Drain: Calculating...\n");
+    }
+
+    // Uptime + memory section with education
+    snprintf(buf + pos, sizeof(buf) - pos,
+             "Uptime: %luh %02lum\n\n"
+             "Fast memory: %u KB (%s)\n"
+             "  >100 OK, <50 = problems\n"
+             "Slow memory: %u KB (%s)\n"
+             "  >500 OK, <100 = problems",
+             (unsigned long)up_h, (unsigned long)up_m,
+             (unsigned)free_dram, dram_health,
+             (unsigned)free_psram, psram_health);
+
+    lv_label_set_text(bat_info_lbl, buf);
+}
+
+static void build_battery_screen() {
+    battery_screen = lv_obj_create(NULL);
+    lv_obj_set_style_bg_color(battery_screen, lv_color_hex(0x000000), 0);
+    lv_obj_set_style_text_color(battery_screen, lv_color_hex(0xE8E8E8), 0);
+    lv_obj_clear_flag(battery_screen, LV_OBJ_FLAG_SCROLLABLE);
+
+    make_title(battery_screen, "System Info");
+    make_close_btn(battery_screen, bat_close_cb);
+
+    bat_info_lbl = lv_label_create(battery_screen);
+    lv_label_set_long_mode(bat_info_lbl, LV_LABEL_LONG_WRAP);
+    lv_obj_set_width(bat_info_lbl, 220);
+    lv_obj_set_style_text_font(bat_info_lbl, &lv_font_montserrat_14, 0);
+    lv_label_set_text(bat_info_lbl, "Loading...");
+    lv_obj_align(bat_info_lbl, LV_ALIGN_TOP_LEFT, 12, 48);
+}
+
 // =============================================================================
 
 static lv_obj_t* notif_banner       = nullptr;
@@ -1235,6 +1792,10 @@ void ui_init() {
     build_timer_screen();
     build_alarm_screen();
     build_weather_screen();
+    build_dnd_screen();
+    build_dnd_custom_screen();
+    build_pomodoro_screen();
+    build_battery_screen();
     build_notif_banner();
     build_notif_detail_screen();
     lv_screen_load(home_screen);
@@ -1257,6 +1818,31 @@ void ui_showTimer() {
 void ui_showAlarm() {
     al_update_display();
     lv_screen_load(alarm_screen);
+}
+
+void ui_showDnd() {
+    dnd_update_status();
+    lv_screen_load(dnd_screen);
+}
+
+void ui_showDndCustom() {
+    dnd_custom_update();
+    lv_screen_load(dnd_custom_screen);
+}
+
+void ui_showPomodoro() {
+    pom_update_picker();
+    pom_update_display();
+    lv_screen_load(pomodoro_screen);
+}
+
+bool ui_pomodoroIsRunning() {
+    return g_pomRunning;
+}
+
+void ui_showBatteryDetail() {
+    bat_update_info();
+    lv_screen_load(battery_screen);
 }
 
 // Periodic tick for clock features. Called from ui_tick().
@@ -1299,6 +1885,9 @@ void ui_clockTick() {
             tm_update_display();
         }
     }
+
+    // Pomodoro — update countdown and handle phase transitions.
+    pom_tick();
 
     // Alarm — check current time vs target every 5 sec while enabled.
     static uint32_t last_alarm_check = 0;
@@ -1502,54 +2091,10 @@ void ui_setWeatherError(const char* err_code) {
     w_render_subscreen();
 }
 
-void ui_refreshSteps() {
-    if (!lbl_steps) return;
-    // Any explicit refresh clears a pending confirm — the count is the
-    // canonical state and any tap-to-confirm UI is just a temporary overlay.
-    g_stepsConfirmPending = false;
-    uint32_t steps = instance.sensor.getPedometerCounter();
-    char buf[24];
-    snprintf(buf, sizeof(buf), "%lu steps", (unsigned long)steps);
-    lv_label_set_text(lbl_steps, buf);
-    // Clear any local color override (e.g. amber from confirm-pending mode)
-    // so the label inherits the button's default text color again.
-    lv_obj_remove_local_style_prop(lbl_steps, LV_STYLE_TEXT_COLOR, 0);
-    lv_obj_invalidate(lbl_steps);
-    lv_refr_now(NULL);
-}
-
-// Tap-twice-to-confirm pattern for the Steps button. Returns true if THIS
-// tap is the confirming second tap (caller should perform the reset);
-// returns false if this is the first tap (just arm the confirm overlay) or
-// if the button isn't built yet.
-bool ui_handleStepsTap() {
-    if (!lbl_steps) return false;
-    if (g_stepsConfirmPending) {
-        // Second tap within the timeout — caller will reset and call
-        // ui_refreshSteps() which clears g_stepsConfirmPending.
-        return true;
-    }
-    // First tap — arm confirm. Show "Tap to confirm" in amber and start the
-    // expiry timer. ui_tickStepsConfirm() (called from ui_tick) will revert
-    // automatically if no second tap arrives in STEPS_CONFIRM_TIMEOUT_MS.
-    g_stepsConfirmPending = true;
-    g_stepsConfirmExpiresMs = millis() + STEPS_CONFIRM_TIMEOUT_MS;
-    lv_label_set_text(lbl_steps, "Tap to confirm");
-    lv_obj_set_style_text_color(lbl_steps, lv_color_hex(0xFBBF24), 0);
-    lv_obj_invalidate(lbl_steps);
-    lv_refr_now(NULL);
-    return false;
-}
-
-// Called from ui_tick() each second to expire stale confirm-pending state.
-static void update_steps_confirm_expiry() {
-    if (!g_stepsConfirmPending) return;
-    if (millis() > g_stepsConfirmExpiresMs) {
-        // Timeout — silently revert to the live count (this also clears the
-        // pending flag and the amber color override via ui_refreshSteps).
-        ui_refreshSteps();
-    }
-}
+// Steps button removed from the grid — these are no-ops now.
+void ui_refreshSteps() {}
+bool ui_handleStepsTap() { return false; }
+static void update_steps_confirm_expiry() {}
 
 void ui_showSending() {
     set_speak_button("Sending...", 0xFBBF24);      // amber
@@ -1622,21 +2167,18 @@ static void update_clock() {
 static void update_battery() {
     int pct = instance.pmu.getBatteryPercent();
     bool charging = instance.pmu.isCharging();
+
+    // Record sample for drain rate tracking (only actually stores every 5 min)
+    bat_record_sample(pct);
+
     char buf[24];
     snprintf(buf, sizeof(buf), "%s%d%%", charging ? "+" : "BAT ", pct);
     lv_label_set_text(lbl_battery, buf);
 
     lv_label_set_text(lbl_wifi, net_isConnected() ? "WiFi OK" : "WiFi -");
 
-    // Step count from the BMA423 pedometer (already enabled in setup() via
-    // configureMotionWake → instance.sensor.enablePedometer()). Skip the
-    // refresh while a confirm-pending overlay is active so we don't stomp
-    // on the "Tap to confirm" label mid-prompt.
-    if (!g_stepsConfirmPending) {
-        uint32_t steps = instance.sensor.getPedometerCounter();
-        snprintf(buf, sizeof(buf), "%lu steps", (unsigned long)steps);
-        lv_label_set_text(lbl_steps, buf);
-    }
+    // (Steps button removed — pedometer still runs for future use but
+    // no longer has a home-screen label to update.)
 }
 
 void ui_tick() {

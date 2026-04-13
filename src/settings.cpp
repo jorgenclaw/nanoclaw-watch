@@ -3,9 +3,11 @@
 
 static bool s_metric = false;  // imperial default
 static WiFiCred s_wifi[WIFI_MAX_NETWORKS] = {};
+static char s_notifTs[32] = "1970-01-01T00:00:00.000Z";
 
 static const char* PREFS_NAMESPACE = "watch";
 static const char* KEY_METRIC      = "metric";
+static const char* KEY_NOTIF_TS    = "notif_ts";
 
 // NVS keys for WiFi: ssid0/pass0, ssid1/pass1, ssid2/pass2
 static void wifiKey(const char* prefix, int idx, char* out) {
@@ -16,6 +18,13 @@ void settings_load() {
     Preferences prefs;
     prefs.begin(PREFS_NAMESPACE, true);  // read-only
     s_metric = prefs.getBool(KEY_METRIC, false);
+
+    // Load last notification timestamp
+    String ts = prefs.getString(KEY_NOTIF_TS, "");
+    if (ts.length() > 0 && ts.length() < sizeof(s_notifTs)) {
+        strncpy(s_notifTs, ts.c_str(), sizeof(s_notifTs) - 1);
+        s_notifTs[sizeof(s_notifTs) - 1] = '\0';
+    }
 
     // Load WiFi credentials
     for (int i = 0; i < WIFI_MAX_NETWORKS; i++) {
@@ -36,8 +45,8 @@ void settings_load() {
 
     int count = 0;
     for (int i = 0; i < WIFI_MAX_NETWORKS; i++) if (s_wifi[i].valid) count++;
-    Serial.printf("[settings] loaded: metric=%d  wifi_networks=%d\n",
-                  s_metric ? 1 : 0, count);
+    Serial.printf("[settings] loaded: metric=%d  wifi_networks=%d  notif_ts=%s\n",
+                  s_metric ? 1 : 0, count, s_notifTs);
 }
 
 bool settings_isMetric() {
@@ -118,4 +127,19 @@ void settings_clearAllWifi() {
     }
     prefs.end();
     Serial.println("[settings] cleared all wifi credentials");
+}
+
+const char* settings_getLastNotifTimestamp() {
+    return s_notifTs;
+}
+
+void settings_setLastNotifTimestamp(const char* ts) {
+    if (!ts || !ts[0]) return;
+    strncpy(s_notifTs, ts, sizeof(s_notifTs) - 1);
+    s_notifTs[sizeof(s_notifTs) - 1] = '\0';
+    Preferences prefs;
+    prefs.begin(PREFS_NAMESPACE, false);
+    prefs.putString(KEY_NOTIF_TS, s_notifTs);
+    prefs.end();
+    Serial.printf("[settings] saved notif_ts=%s\n", s_notifTs);
 }

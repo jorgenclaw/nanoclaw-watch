@@ -17,6 +17,8 @@
 #include <LilyGoLib.h>
 #include <LV_Helper.h>
 
+#include <WiFi.h>
+
 #include "config.h"
 #include "state.h"
 #include "network.h"
@@ -39,7 +41,10 @@ static bool     g_weatherEverFetched = false;
 static const uint32_t WEATHER_RETRY_MS = 60000;
 static uint32_t g_lastPollMs = 0;
 static uint32_t g_lastNotifPollMs = 0;
-static char     g_lastNotifTimestamp[32] = "1970-01-01T00:00:00.000Z";
+// DND (Do Not Disturb) — when millis() < g_dndUntil, notification buzzes
+// are suppressed (banner still shows, just no haptic). Set by the DND
+// submenu; 0 = off.
+uint32_t g_dndUntil = 0;
 static WatchNotification g_notifBuf[3];
 static bool g_powerKeyPressed = false;
 static bool g_dimMode = false;
@@ -114,47 +119,207 @@ void onSpeakButtonPressed() {
 
 void onQuickPromptPressed(int idx) {
     if (currentState() != STATE_HOME) return;
-    // Quick-button index 1 is the Clock entry — opens a sub-screen with
-    // alarm/timer/stopwatch buttons (currently stubbed). The sub-screen has
-    // its own Close button (top-right) that returns to home.
-    if (idx == 1) {
-        Serial.println("[ui] clock button pressed — opening sub-screen");
-        instance.vibrator();
+    instance.vibrator();
+    Serial.printf("[ui] grid button %d tapped\n", idx);
+
+    switch (idx) {
+    case 0: // DND
+        setState(STATE_DND);
+        ui_showDnd();
+        break;
+    case 1: // Clock
         setState(STATE_CLOCK);
         ui_showClock();
-        return;
+        break;
+    case 2: { // Flashlight — full white screen, tap to dismiss
+        Serial.println("[ui] flashlight on");
+        lv_obj_t* flash = lv_obj_create(NULL);
+        lv_obj_set_style_bg_color(flash, lv_color_hex(0xFFFFFF), 0);
+        lv_obj_set_style_bg_opa(flash, LV_OPA_COVER, 0);
+        lv_obj_clear_flag(flash, LV_OBJ_FLAG_SCROLLABLE);
+        lv_refr_now(NULL);          // flush pending frames before screen swap
+        lv_screen_load(flash);
+        lv_refr_now(NULL);          // push the white screen to display immediately
+        instance.setBrightness(255);
+        // Wait for finger lift (from the button tap), then wait for new tap.
+        int16_t tx, ty;
+        while (instance.getPoint(&tx, &ty, 1) > 0) delay(10);
+        while (instance.getPoint(&tx, &ty, 1) == 0) delay(10);
+        while (instance.getPoint(&tx, &ty, 1) > 0) delay(10);
+        // Dismiss
+        Serial.println("[ui] flashlight off");
+        lv_refr_now(NULL);          // flush before teardown
+        lv_obj_delete(flash);
+        instance.setBrightness(BRIGHTNESS_ACTIVE);
+        setState(STATE_HOME);
+        ui_showHome();
+        lv_refr_now(NULL);          // push home screen immediately
+        touchInteraction();
+        break;
     }
-    // Quick-button index 2 is the Steps button — shows live pedometer count
-    // and resets the counter via tap-twice-to-confirm. First tap arms the
-    // confirm overlay (label flips to amber "Tap to confirm" for 3 sec); the
-    // second tap actually resets the BMA423 pedometer. Either way the user
-    // gets a haptic buzz on the tap that's recognized.
-    if (idx == 2) {
-        Serial.println("[ui] steps button tapped");
-        instance.vibrator();
-        if (ui_handleStepsTap()) {
-            // Confirming second tap — perform the reset and refresh.
-            Serial.println("[ui] steps reset confirmed");
-            instance.sensor.resetPedometer();
-            ui_refreshSteps();
-        }
-        return;
-    }
-    // Slot 3 is the Weather button — opens the Weather sub-screen which
-    // shows current temp + forecast + sunrise/sunset + a unit toggle and
-    // a Refresh button. Background auto-refresh keeps the data fresh
-    // every 30 min, so the user can usually open the screen and see
-    // recent data without forcing a fetch.
-    if (idx == 3) {
-        Serial.println("[ui] weather button tapped — opening sub-screen");
-        instance.vibrator();
+    case 3: // Weather
         setState(STATE_WEATHER);
         ui_showWeather();
-        return;
+        break;
+    case 4: { // Network info — use static buffer so text persists on screen
+        Serial.println("[ui] network info");
+        static char info[256];
+        const WiFiCred* creds = settings_getWifiCreds();
+        int pos = 0;
+        if (net_isConnected()) {
+            pos += snprintf(info + pos, sizeof(info) - pos,
+                "Connected: %s\nIP: %s\nSignal: %d dBm\n\n",
+                WiFi.SSID().c_str(),
+                WiFi.localIP().toString().c_str(),
+                WiFi.RSSI());
+        } else {
+            pos += snprintf(info + pos, sizeof(info) - pos, "Not connected\n\n");
+        }
+        pos += snprintf(info + pos, sizeof(info) - pos, "Saved networks:\n");
+        for (int i = 0; i < WIFI_MAX_NETWORKS; i++) {
+            if (creds[i].valid)
+                pos += snprintf(info + pos, sizeof(info) - pos, "  %d. %s\n", i+1, creds[i].ssid);
+        }
+        setLastResponse(info);
+        setState(STATE_RESPONSE);
+        ui_showResponse(info);
+        break;
     }
-    // Slot 0 is a regular text prompt — POST the configured prompt text
-    // to the host as a watch message.
-    doQuickPrompt(idx);
+    case 5: // Inbox — ask Jorgenclaw to check Proton email
+        Serial.println("[ui] inbox check");
+        ui_showSending();
+        lv_refr_now(NULL);
+        {
+            char reply[4096];
+            bool ok = net_postText(
+                "SYSTEM: Scott tapped 'Inbox' on his watch. "
+                "Check the Proton Mail inbox and give a brief "
+                "summary of unread emails (sender and subject, "
+                "max 5). If no unread, say 'Inbox clear'.",
+                reply, sizeof(reply));
+            if (ok && reply[0]) {
+                setLastResponse(reply);
+                setState(STATE_RESPONSE);
+                ui_showResponse(reply);
+            } else if (ok) {
+                ui_showError("Inbox clear");
+            } else {
+                ui_showError("Host unreachable");
+            }
+        }
+        touchInteraction();
+        break;
+    case 6: // Find Phone — ask Jorgenclaw to ping Scott
+        Serial.println("[ui] find phone");
+        ui_showSending();
+        lv_refr_now(NULL);
+        {
+            char reply[512];
+            bool ok = net_postText(
+                "SYSTEM: Scott pressed 'Find Phone' on his watch. "
+                "Send a Signal message to Scott that says "
+                "'FIND MY PHONE - ring ring!' so his phone buzzes.",
+                reply, sizeof(reply));
+            if (ok) {
+                ui_showSent();
+                lv_refr_now(NULL);
+                delay(1500);
+            } else {
+                ui_showError("Host unreachable");
+                lv_refr_now(NULL);
+                delay(2000);
+            }
+        }
+        setState(STATE_HOME);
+        ui_showHome();
+        touchInteraction();
+        break;
+    case 7: // Next Event
+        Serial.println("[ui] next event — stub");
+        // TODO: show next calendar event (once protond works)
+        break;
+    case 8: // Clicker
+        Serial.println("[ui] clicker — stub");
+        // TODO: BLE HID presentation clicker
+        break;
+    case 9: { // NanoClaw Status — ping host
+        Serial.println("[ui] nanoclaw status");
+        if (!net_isConnected()) {
+            ui_showError("No WiFi");
+            break;
+        }
+        ui_showSending();
+        lv_refr_now(NULL);
+        uint32_t t0 = millis();
+        char reply[512];
+        bool ok = net_postText(
+            "SYSTEM: Scott tapped 'Status' on his watch. "
+            "Reply with a one-line status: uptime, last agent "
+            "run time, and how many messages today.",
+            reply, sizeof(reply));
+        uint32_t ping_ms = millis() - t0;
+        if (ok && reply[0]) {
+            char info[600];
+            snprintf(info, sizeof(info),
+                     "Host: reachable (%lums)\n\n%s",
+                     (unsigned long)ping_ms, reply);
+            setLastResponse(info);
+            setState(STATE_RESPONSE);
+            ui_showResponse(info);
+        } else {
+            char info[128];
+            snprintf(info, sizeof(info),
+                     "Host: %s (%lums)",
+                     ok ? "no response" : "unreachable",
+                     (unsigned long)ping_ms);
+            ui_showError(info);
+        }
+        touchInteraction();
+        break;
+    }
+    case 10: // Spotify
+        Serial.println("[ui] spotify — stub");
+        break;
+    case 11: { // Screen Test — cycle R, G, B, W, Black; tap to advance
+        Serial.println("[ui] screen test");
+        const uint32_t colors[] = { 0xFF0000, 0x00FF00, 0x0000FF, 0xFFFFFF, 0x000000 };
+        const char* names[]     = { "RED",    "GREEN",  "BLUE",   "WHITE",  "BLACK" };
+        instance.setBrightness(255);
+        int16_t tx, ty;
+        // Wait for initial button-press finger to lift
+        while (instance.getPoint(&tx, &ty, 1) > 0) delay(10);
+        delay(100);
+        for (int c = 0; c < 5; c++) {
+            // Create a fresh screen for each color so lv_screen_load
+            // triggers a clean transition.
+            lv_obj_t* scr = lv_obj_create(NULL);
+            lv_obj_set_style_bg_color(scr, lv_color_hex(colors[c]), 0);
+            lv_obj_set_style_bg_opa(scr, LV_OPA_COVER, 0);
+            lv_obj_clear_flag(scr, LV_OBJ_FLAG_SCROLLABLE);
+            lv_obj_t* lbl = lv_label_create(scr);
+            lv_obj_set_style_text_font(lbl, &lv_font_montserrat_18, 0);
+            bool dark_bg = (colors[c] == 0x0000FF || colors[c] == 0xFF0000 || colors[c] == 0x000000);
+            lv_obj_set_style_text_color(lbl, lv_color_hex(dark_bg ? 0xFFFFFF : 0x000000), 0);
+            lv_label_set_text_fmt(lbl, "%s\n\nTap for next", names[c]);
+            lv_label_set_long_mode(lbl, LV_LABEL_LONG_WRAP);
+            lv_obj_set_style_text_align(lbl, LV_TEXT_ALIGN_CENTER, 0);
+            lv_obj_set_width(lbl, 200);
+            lv_obj_center(lbl);
+            lv_screen_load(scr);
+            lv_refr_now(NULL);
+            // Wait for tap
+            while (instance.getPoint(&tx, &ty, 1) == 0) delay(10);
+            while (instance.getPoint(&tx, &ty, 1) > 0) delay(10);
+            lv_obj_delete(scr);
+        }
+        instance.setBrightness(BRIGHTNESS_ACTIVE);
+        setState(STATE_HOME);
+        ui_showHome();
+        lv_refr_now(NULL);
+        touchInteraction();
+        break;
+    }
+    }
 }
 
 // Dedicated callback for the pinned bottom-edge Sleep button. Used to live
@@ -188,9 +353,32 @@ void onWifiLongPress() {
     if (currentState() != STATE_HOME) return;
     Serial.println("[main] WiFi long-press — opening config portal");
     instance.vibrator();
-    // Show a status on the watch before blocking in the portal.
-    ui_showError("WiFi Setup\nConnect to: " SETUP_AP_NAME);
-    lv_task_handler();
+    // Show setup instructions on the watch. Use a dedicated screen so
+    // the text isn't truncated by the speak button.
+    {
+        lv_obj_t* scr = lv_obj_create(NULL);
+        lv_obj_set_style_bg_color(scr, lv_color_hex(0x000000), 0);
+        lv_obj_clear_flag(scr, LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_t* t = lv_label_create(scr);
+        lv_obj_set_style_text_font(t, &lv_font_montserrat_18, 0);
+        lv_obj_set_style_text_color(t, lv_color_hex(0xE8E8E8), 0);
+        lv_label_set_text(t, "WiFi Setup");
+        lv_obj_align(t, LV_ALIGN_TOP_MID, 0, 20);
+        lv_obj_t* body = lv_label_create(scr);
+        lv_obj_set_style_text_font(body, &lv_font_montserrat_14, 0);
+        lv_obj_set_style_text_color(body, lv_color_hex(0xAAAAAA), 0);
+        lv_label_set_long_mode(body, LV_LABEL_LONG_WRAP);
+        lv_obj_set_width(body, 220);
+        lv_label_set_text(body,
+            "On your phone, connect\n"
+            "to WiFi network:\n\n"
+            SETUP_AP_NAME "\n\n"
+            "Then open a browser.\n\n"
+            "Side button = cancel");
+        lv_obj_align(body, LV_ALIGN_TOP_MID, 0, 50);
+        lv_screen_load(scr);
+        lv_refr_now(NULL);
+    }
     net_startConfigPortal();
     // Portal returned — either connected or rebooting. Go home.
     setState(STATE_HOME);
@@ -541,12 +729,13 @@ static void doNotifPoll() {
     if (millis() - g_lastNotifPollMs < NOTIF_POLL_INTERVAL_MS) return;
     g_lastNotifPollMs = millis();
 
-    int count = net_pollNotifications(g_lastNotifTimestamp, g_notifBuf, 3);
+    int count = net_pollNotifications(settings_getLastNotifTimestamp(),
+                                      g_notifBuf, 3);
     if (count <= 0) return;
 
-    // Update high-water mark to the newest timestamp received.
-    strncpy(g_lastNotifTimestamp, g_notifBuf[count - 1].timestamp,
-            sizeof(g_lastNotifTimestamp) - 1);
+    // Update high-water mark to the newest timestamp received (persisted to
+    // NVS so reboots don't re-fetch old notifications).
+    settings_setLastNotifTimestamp(g_notifBuf[count - 1].timestamp);
 
     // Show banner for the most recent notification.
     g_latestNotifIdx = count - 1;
@@ -561,12 +750,17 @@ static void doNotifPoll() {
     }
 
     // Flush LVGL so the banner is visible immediately.
-    lv_task_handler();
+    lv_refr_now(NULL);
 
     // Double-buzz notification pattern (distinct from single confirmation buzz).
-    instance.vibrator();
-    delay(150);
-    instance.vibrator();
+    // Suppressed during DND — banner still shows, just no haptic.
+    if (g_dndUntil == 0 || millis() >= g_dndUntil) {
+        instance.vibrator();
+        delay(150);
+        instance.vibrator();
+    } else {
+        Serial.println("[notif] DND active — suppressing buzz");
+    }
 
     touchInteraction();  // prevent imminent idle-sleep
     Serial.printf("[notif] showing: %s — %s\n", newest.from, newest.preview);
@@ -783,7 +977,7 @@ void loop() {
     //     alarm. Documented in project memory.
     if (currentState() == STATE_HOME &&
         millis() - lastInteractionMs() > IDLE_SLEEP_MS) {
-        if (!ui_timerIsRunning() && !ui_alarmIsImminent(60)) {
+        if (!ui_timerIsRunning() && !ui_alarmIsImminent(60) && !ui_pomodoroIsRunning()) {
             enterDimMode();
         }
     }

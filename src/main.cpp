@@ -664,7 +664,13 @@ void setup() {
 
 void loop() {
     instance.loop();          // handles hardware events -> device_event_cb
-    lv_task_handler();        // LVGL tick
+
+    // When dimmed, skip LVGL tick so touch events don't accidentally
+    // trigger buttons (Speak, Sleep, etc.) on the black screen. Only
+    // process hardware events + polls + wake-from-dim logic below.
+    if (!g_dimMode) {
+        lv_task_handler();    // LVGL tick (touch + redraw)
+    }
 
     // Wake word check — if the wake_word task flagged a detection, kick
     // off a voice capture immediately (same code path as tapping the

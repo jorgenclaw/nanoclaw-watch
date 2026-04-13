@@ -92,8 +92,8 @@
 
 // --- Display ---
 #define BRIGHTNESS_ACTIVE  200  // 0-255, screen brightness when awake
-#define BRIGHTNESS_DIM       1  // 0-255, "screen off" dim mode (CPU stays on
-                                // so notifications + wake word keep working)
+#define BRIGHTNESS_DIM       0  // backlight fully off (CPU stays on so
+                                // notifications + wake word keep working)
 
 // --- Timezone offset for clock display (seconds) ---
 // Pacific Standard Time = -8 * 3600. PDT = -7 * 3600.

@@ -43,6 +43,9 @@ static char     g_lastNotifTimestamp[32] = "1970-01-01T00:00:00.000Z";
 static WatchNotification g_notifBuf[3];
 static bool g_powerKeyPressed = false;
 static bool g_dimMode = false;
+// Set true on wake from dim — suppress LVGL input processing until the
+// finger lifts so the wake touch doesn't accidentally press a button.
+static bool g_waitForLift = false;
 // Set to true by the recording loop's direct touch poll (or as a fallback
 // by onSpeakButtonPressed via the LVGL CLICK path) when the user taps the
 // SEND zone of the speak button while recording. doVoiceCapture() breaks
@@ -551,7 +554,14 @@ static void doNotifPoll() {
     ui_showNotifBanner(newest.from, newest.preview, newest.full_text);
 
     // Wake the screen if dimmed — notifications should be visible.
-    if (g_dimMode) exitDimMode();
+    if (g_dimMode) {
+        g_dimMode = false;  // clear directly (not exitDimMode) to avoid
+                            // the justWoke guard — we WANT LVGL to render
+        instance.setBrightness(BRIGHTNESS_ACTIVE);
+    }
+
+    // Flush LVGL so the banner is visible immediately.
+    lv_task_handler();
 
     // Double-buzz notification pattern (distinct from single confirmation buzz).
     instance.vibrator();
@@ -599,6 +609,7 @@ static void exitDimMode() {
     Serial.println("[main] exiting dim mode");
     instance.setBrightness(BRIGHTNESS_ACTIVE);
     g_dimMode = false;
+    g_waitForLift = true;  // suppress LVGL input until finger lifts
     touchInteraction();
 }
 
@@ -666,10 +677,21 @@ void loop() {
     instance.loop();          // handles hardware events -> device_event_cb
 
     // When dimmed, skip LVGL tick so touch events don't accidentally
-    // trigger buttons (Speak, Sleep, etc.) on the black screen. Only
-    // process hardware events + polls + wake-from-dim logic below.
+    // trigger buttons on the black screen. After wake, keep skipping
+    // input until the finger lifts — otherwise the wake touch triggers
+    // whatever button is underneath.
     if (!g_dimMode) {
-        lv_task_handler();    // LVGL tick (touch + redraw)
+        if (g_waitForLift) {
+            int16_t tx, ty;
+            if (instance.getPoint(&tx, &ty, 1) == 0) {
+                // Finger lifted — safe to resume normal LVGL processing.
+                g_waitForLift = false;
+            }
+            // Render-only while waiting (no input processing).
+            lv_refr_now(NULL);
+        } else {
+            lv_task_handler();    // LVGL tick (touch + redraw)
+        }
     }
 
     // Wake word check — if the wake_word task flagged a detection, kick
@@ -678,6 +700,7 @@ void loop() {
     // doVoiceCapture assumes that's where we start.
     if (wake_word_triggered() && currentState() == STATE_HOME) {
         Serial.println("[main] wake word -> voice capture");
+        if (g_dimMode) exitDimMode();
         touchInteraction();
         doVoiceCapture();
     }
@@ -722,13 +745,17 @@ void loop() {
         }
     }
 
-    // Wake from dim mode on any touch. The LVGL touch driver fires
-    // continuously while a finger is down, so we detect it here.
+    // Wake from dim mode on any touch. Poll the touch panel directly
+    // (not through LVGL, which is paused in dim mode). Check multiple
+    // times per loop to catch brief taps that might land between polls.
     if (g_dimMode) {
         int16_t tx, ty;
-        if (instance.getPoint(&tx, &ty, 1) > 0) {
-            exitDimMode();
+        bool touched = false;
+        for (int i = 0; i < 5 && !touched; i++) {
+            if (instance.getPoint(&tx, &ty, 1) > 0) touched = true;
+            else delay(1);
         }
+        if (touched) exitDimMode();
     }
 
     // Diagnostic: print idle progress every 5 sec while in HOME state.

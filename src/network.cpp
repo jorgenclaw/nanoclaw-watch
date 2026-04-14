@@ -13,6 +13,27 @@ static uint32_t s_lastReconnectAttempt = 0;
 static const uint32_t RECONNECT_INTERVAL_MS = 10000;
 static WiFiMulti wifiMulti;
 
+// --- Non-blocking portal state ---
+// WiFiManager must outlive the start call since main loop pumps its
+// process() between ticks. Keep it heap-allocated so the destructor only
+// runs when we're actually done with it.
+static WiFiManager* s_portalWm = nullptr;
+static bool s_portalActive = false;
+static bool s_portalSaved  = false;
+
+// WiFiManager save callback — fires when the user submits credentials
+// via the portal web UI. Persists them to our NVS slot storage so the
+// next boot can reconnect without the portal.
+static void onPortalSaveCredentials() {
+    String ssid = WiFi.SSID();
+    String pass = s_portalWm ? s_portalWm->getWiFiPass() : String("");
+    if (ssid.length() > 0) {
+        settings_addWifi(ssid.c_str(), pass.c_str());
+        Serial.printf("[net] portal saved network: %s\n", ssid.c_str());
+        s_portalSaved = true;
+    }
+}
+
 // (Re)populate WiFiMulti from the NVS-backed credential slots.
 static void loadMultiCredentials() {
     const WiFiCred* creds = settings_getWifiCreds();
@@ -138,17 +159,69 @@ void net_loop() {
     s_lastReconnectAttempt = millis();
 }
 
-void net_startConfigPortal() {
-    Serial.println("[net] config portal requested");
-    bool ok = runConfigPortal();
-    if (!ok) {
-        Serial.println("[net] portal timed out — rebooting");
-        ESP.restart();
+// --- Non-blocking portal ---
+
+bool net_startPortalAsync() {
+    if (s_portalActive) return false;
+    if (s_portalWm) { delete s_portalWm; s_portalWm = nullptr; }
+    s_portalWm = new WiFiManager();
+    if (!s_portalWm) {
+        Serial.println("[net] portal: alloc failed");
+        return false;
     }
-    // Rebuild WiFiMulti with the updated credential list.
+    s_portalSaved = false;
+    s_portalWm->setTitle("NanoClaw Watch");
+    // Timeout 0 = no auto-close. Captive-portal setup can take a while,
+    // especially if the user is troubleshooting their phone's WiFi
+    // settings. User dismisses via the Close button or by completing the
+    // web flow (which triggers onPortalSaveCredentials + breakAfterConfig).
+    s_portalWm->setConfigPortalTimeout(0);
+    s_portalWm->setConfigPortalBlocking(false);          // critical
+    s_portalWm->setBreakAfterConfig(true);               // return from process() when saved
+    s_portalWm->setSaveConfigCallback(onPortalSaveCredentials);
+
+    Serial.println("[net] starting non-blocking portal — AP: " SETUP_AP_NAME);
+    // In non-blocking mode, startConfigPortal() ALWAYS returns false
+    // because `result` is initialized to false and the non-blocking
+    // return path skips the loop that would set it to true on success.
+    // (See WiFiManager.cpp startConfigPortal body.) So the return value
+    // tells us nothing — we just assume the portal is up if the library
+    // didn't crash. Timeout / user save / user cancel are all detected
+    // later via process() in the main loop.
+    s_portalWm->startConfigPortal(SETUP_AP_NAME);
+    s_portalActive = true;
+    return true;
+}
+
+void net_portalProcess() {
+    if (!s_portalActive || !s_portalWm) return;
+    // process() returns true when the portal is "done" — either the user
+    // saved credentials (setBreakAfterConfig) or the timeout expired.
+    bool done = s_portalWm->process();
+    if (done) {
+        Serial.println("[net] portal: process() reported done");
+        // Teardown happens via net_portalStop() from the main loop's
+        // completion path. Mark it inactive here so the main loop can
+        // observe the transition.
+        s_portalActive = false;
+    }
+}
+
+void net_portalStop() {
+    if (!s_portalWm) { s_portalActive = false; return; }
+    Serial.println("[net] portal: stopping");
+    s_portalWm->stopConfigPortal();
+    delete s_portalWm;
+    s_portalWm = nullptr;
+    s_portalActive = false;
+    // Rebuild WiFiMulti — if credentials were saved, it'll pick them up;
+    // if not, this is a no-op refresh.
     wifiMulti = WiFiMulti();
     loadMultiCredentials();
 }
+
+bool net_portalIsActive() { return s_portalActive; }
+bool net_portalDidSave()  { return s_portalSaved; }
 
 void net_syncTime() {
     if (!net_isConnected()) return;

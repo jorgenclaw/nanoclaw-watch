@@ -8,7 +8,20 @@
 void net_begin();              // start WiFi connect via WiFiManager (blocks on first boot)
 bool net_isConnected();        // current WiFi link status
 void net_loop();               // call periodically; handles reconnect
-void net_startConfigPortal();  // open captive portal to reconfigure WiFi (blocks)
+
+// --- Non-blocking config portal ---
+// Used when the watch is already running and the user wants to add/change
+// WiFi without rebooting. Launch with net_startPortalAsync(), then pump
+// net_portalProcess() from the main loop every tick. Check state via
+// net_portalIsActive(); when it returns false, the portal has finished
+// (either the user saved credentials, the timeout expired, or it was
+// cancelled via net_portalStop()). After completion, call net_portalDidSave()
+// to know whether new credentials were persisted.
+bool net_startPortalAsync();   // begin non-blocking portal; true if started
+void net_portalProcess();      // call every main loop tick while STATE_PORTAL
+void net_portalStop();         // user cancelled via Close button
+bool net_portalIsActive();     // true between startPortalAsync and completion
+bool net_portalDidSave();      // true if the most recent portal saved creds
 
 // Send a text-only prompt to the host. Blocks for up to HTTP_TIMEOUT_MS.
 // Writes response into reply_buf (must be at least 512 bytes). Returns true on success.

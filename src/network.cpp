@@ -528,12 +528,17 @@ bool net_fetchWeather(WeatherData* out, char* err_buf, size_t err_buf_size) {
     filter["current_condition"][0]["windspeedMiles"] = true;
     filter["current_condition"][0]["windspeedKmph"]  = true;
     filter["current_condition"][0]["winddir16Point"] = true;
+    filter["current_condition"][0]["humidity"]       = true;
     filter["weather"][0]["maxtempF"]                 = true;
     filter["weather"][0]["maxtempC"]                 = true;
     filter["weather"][0]["mintempF"]                 = true;
     filter["weather"][0]["mintempC"]                 = true;
     filter["weather"][0]["astronomy"][0]["sunrise"]  = true;
     filter["weather"][0]["astronomy"][0]["sunset"]   = true;
+    // Hourly array template: [0] is the ArduinoJson wildcard that applies
+    // the same filter to every element of the hourly array, so we can
+    // walk all 8 hourly buckets and take the max chanceofrain.
+    filter["weather"][0]["hourly"][0]["chanceofrain"] = true;
 
     // Buffer the full response body via getString() instead of stream-
     // parsing. The first attempt used http.getStream() + deserializeJson
@@ -570,6 +575,7 @@ bool net_fetchWeather(WeatherData* out, char* err_buf, size_t err_buf_size) {
     out->uv_index = atoi(cc["uvIndex"]        | "0");
     out->wind_mph = atoi(cc["windspeedMiles"] | "0");
     out->wind_kph = atoi(cc["windspeedKmph"]  | "0");
+    out->humidity_pct = atoi(cc["humidity"]   | "0");
     const char* dir = cc["winddir16Point"] | "--";
     strncpy(out->wind_dir, dir, sizeof(out->wind_dir) - 1);
     out->wind_dir[sizeof(out->wind_dir) - 1] = '\0';
@@ -584,6 +590,17 @@ bool net_fetchWeather(WeatherData* out, char* err_buf, size_t err_buf_size) {
     JsonObject today = weather[0];
     out->today_max_f = atoi(today["maxtempF"] | "0");
     out->today_max_c = atoi(today["maxtempC"] | "0");
+
+    // Chance of rain for today: wttr.in gives 8 three-hour buckets in
+    // weather[0].hourly. Take the max across all buckets — the single
+    // worst window of the day answers "will it rain today?" best.
+    int max_rain = 0;
+    JsonArray hourly = today["hourly"];
+    for (JsonObject h : hourly) {
+        int r = atoi(h["chanceofrain"] | "0");
+        if (r > max_rain) max_rain = r;
+    }
+    out->chance_of_rain_pct = max_rain;
 
     JsonObject astro = today["astronomy"][0];
     const char* sr = astro["sunrise"] | "--:--";
@@ -602,10 +619,11 @@ bool net_fetchWeather(WeatherData* out, char* err_buf, size_t err_buf_size) {
     out->tonight_min_f  = atoi(tomorrow["mintempF"] | "0");
     out->tonight_min_c  = atoi(tomorrow["mintempC"] | "0");
 
-    Serial.printf("[weather] %dF/%dC UV%d wind %d mph %s | "
+    Serial.printf("[weather] %dF/%dC UV%d wind %d mph %s | hum %d%% rain %d%% | "
                   "today %dF tomorrow %dF tonight %dF | sun %s-%s\n",
                   out->temp_f, out->temp_c, out->uv_index,
                   out->wind_mph, out->wind_dir,
+                  out->humidity_pct, out->chance_of_rain_pct,
                   out->today_max_f, out->tomorrow_max_f, out->tonight_min_f,
                   out->sunrise, out->sunset);
     return true;

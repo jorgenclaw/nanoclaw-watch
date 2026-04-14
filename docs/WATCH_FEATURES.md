@@ -8,9 +8,42 @@
 
 ## What the watch is
 
-The NanoClaw Watch is a **LilyGo T-Watch S3** running custom firmware that turns it into a wrist-worn terminal for a Jorgenclaw AI agent. It is NOT a standalone smartwatch — it depends on a NanoClaw host computer (usually the always-on machine you run Jorgenclaw on) for compute, memory, integrations, and most of its intelligence. The watch is the microphone, the speaker, the haptic motor, and the small bright display. The host is the brain.
+The NanoClaw Watch is a **LilyGo T-Watch S3** (or **T-Watch S3 Plus**) running custom firmware that turns it into a wrist-worn terminal for a Jorgenclaw AI agent. It is NOT a standalone smartwatch — it depends on a NanoClaw host computer (usually the always-on machine you run Jorgenclaw on) for compute, memory, integrations, and most of its intelligence. The watch is the microphone, the speaker, the haptic motor, and the small bright display. The host is the brain.
 
 This architecture is the whole point: because the host has unlimited compute and all your integrations, the watch can do things a standalone smartwatch can't.
+
+## Watch variants — base S3 vs S3 Plus
+
+Both variants are available for purchase as flashed NanoClaw watches. They run the exact same firmware; a single compile-time target chooses the variant, and every feature in this document works on both unless explicitly noted. **We recommend the S3 Plus** for almost everyone.
+
+| | **T-Watch S3** (base) | **T-Watch S3 Plus** ⭐ recommended |
+|---|---|---|
+| Core MCU | ESP32-S3, 8 MB PSRAM, 16 MB flash | Same |
+| Display, touch, mic, speaker, haptic, RTC, BMA423, BLE, WiFi | Yes | Yes (identical) |
+| GPS receiver (L76K) | ❌ not present | ✅ present, **off by default** |
+| Battery | Smaller cell | Larger cell — noticeably longer runtime on a charge |
+| Size / weight | Slightly smaller | Slightly larger |
+| Price | Lower | Modest premium |
+
+### Why we recommend the Plus
+
+**Bigger battery is the quiet win.** Every feature you already use — voice capture, reminders, notifications, WiFi — runs longer between charges. GPS is power-hungry when on, but the larger battery absorbs that cost comfortably; and when GPS is off (the default), the Plus just runs noticeably longer than the base.
+
+**Opting in is better than not having the choice.** On the base S3 you simply cannot do location-aware features: no geofenced reminders, no location-tagged memos, no "weather for where I actually am right now." On the Plus you *can* — but only if you explicitly turn GPS on from the watch settings. The privacy posture is "you own the switch," not "you're locked in or locked out."
+
+### Why anyone might still pick the base S3
+
+A smaller, lighter case, a lower price, or a principled "I will never want GPS on my wrist" preference. All valid. We'll flash and ship a base S3 on request without pushback.
+
+### Firmware portability between variants
+
+The NanoClaw Watch firmware is written once and built against whichever board target you pick. Every UI screen, every tile, every notification path, every voice flow is identical across variants. The GPS module (`src/gps.cpp`) compiles on both but is gated by a persistent settings flag that defaults to OFF — so on a base S3 the module is inert dead weight (a few hundred bytes of flash), and on a Plus it only runs when the user has explicitly opted in.
+
+### How "off" really works
+
+When you turn GPS off from the watch UI (or when it's simply never turned on in the first place), the firmware cuts power to the L76K receiver via the PMIC's dedicated GPS power rail. The GPS chip draws zero current. It is not "listening silently" — it is physically off in the same way the mic is off when you're not recording. You can verify this yourself by watching the battery drain rate drop the moment you flip the toggle. No app, no cloud, no trust required.
+
+This matters because GPS is already a passive technology (your watch receives satellite signals, it does not broadcast anything to satellites), and cutting power to the receiver means even the passive listening stops. The receiver becomes a physical non-entity.
 
 ## Hardware inventory
 
@@ -30,8 +63,9 @@ Features are built on top of what the watch physically has. This list is the fea
 | WiFi 2.4 GHz | 802.11 b/g/n | HTTP to the host |
 | BLE 5.0 | Low-energy Bluetooth | *Unused so far* — could do HID, proximity, beacons |
 | Side button | Single physical button | Wake from sleep, interrupt flows |
+| **L76K GPS** (Plus only) | NMEA receiver on a switchable power rail, off by default | Location-tagged memos, geofenced reminders, accurate weather by real location, route/fitness tracking — all opt-in |
 
-Not present: heart rate / PPG sensor, GPS, camera, cellular, NFC, SpO2. Features requiring those are not feasible without a hardware revision.
+Not present on either variant: heart rate / PPG sensor, camera, cellular, NFC, SpO2. Features requiring those are not feasible without a hardware revision. GPS is present on the **S3 Plus only** — see the "Watch variants" section above.
 
 ---
 
@@ -162,6 +196,29 @@ Scheduled haptic buzzes during working hours. If no motion for 60 min → stretc
 Tap once, watch hits `/api/watch/briefing` on the host, agent composes a multi-part summary: weather, calendar, unread message counts, top open tasks. Displayed on the response screen.
 
 **Agent implementation pointer:** new grid tile that calls `net_postText("BRIEFING", ...)` or a dedicated endpoint. Host side: `handleBriefingPost()` that runs the agent with a "morning briefing" prompt template, returns the reply.
+
+### GPS privacy toggle + status dot (S3 Plus)
+
+**Status:** FIRMWARE MODULE BUILT, UI tile pending hardware in hand.
+
+The `src/gps.cpp` module is written, compiles on both variants, and is gated by an opt-in NVS setting that defaults to OFF. When a user enables it, the firmware powers on the L76K via the PMIC's GPS rail and pumps NMEA through TinyGPSPlus. A small status dot appears in the top-right of the home screen (to the left of the WiFi signal bars) — hidden when GPS is off, dim gray while searching, green once a fix is held. Raw and privacy-fuzzed coordinate getters are both exposed so any feature that leaves the watch can send the fuzzed (~1.1 km grid) version by default.
+
+**What's still needed before shipping:** (1) a settings tile or long-press gesture that calls `gps_setEnabled(bool)`, (2) verification of the exact UART RX/TX pins against the LilyGoLib S3-Plus variant header, (3) replacing two `TODO` lines in `src/gps.cpp` with the real `instance.powerControl(POWER_GPS, …)` calls once the enum name is confirmed. The third item is what turns "off" from a software mute into a hardware kill. All of this is ~a half-day of work and gets done when the first Plus unit is in hand for hardware verification.
+
+**Agent implementation pointer:** module API in `src/gps.h`; settings persistence in `src/settings.cpp` under `KEY_GPS = "gps_on"`; home-screen dot in `src/ui.cpp:update_gps_status()` following the `wifi_bar*` pattern. Hook into `src/main.cpp:setup()` and `loop()` already in place.
+
+### GPS-powered features (S3 Plus, require GPS opt-in)
+
+**Status:** PLANNED once the GPS module is fully wired up. All of these gracefully no-op when GPS is off or on a base S3 — there are no hard dependencies, only "if you opted in, these get smarter."
+
+- **Location-tagged memo capture** — memos include the fuzzed coordinates of where they were spoken, so the agent can say "the note you dictated near downtown" when you ask for it later.
+- **Geofenced reminders** — "remind me to grab milk when I'm near a grocery store," evaluated on-watch so raw coordinates never leave the device. The watch just sends `arrived:grocery` to the host.
+- **Weather for your actual location** — instead of the hard-coded `WEATHER_LOCATION` in `config.h`, the weather tile uses the current GPS fix (rounded to city-level) to pick the right place.
+- **Commute detection** — if the watch notices sustained motion on a known route, it can proactively push drive-time / ETA info to the morning briefing.
+- **Fitness tracking** — distance, pace, altitude for walks and runs. Route stays on-device by default.
+- **Emergency SOS with coordinates** — combined with the existing "emergency panic button" idea, a triple-tap sends a Signal message to a predefined contact with a map pin.
+
+All of these are designed around the same privacy default: fuzzed coordinates for anything that leaves the watch, raw coordinates only for on-device geofence matching, and a hardware power cut whenever GPS is toggled off.
 
 ---
 

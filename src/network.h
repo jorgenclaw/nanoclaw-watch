@@ -70,6 +70,8 @@ struct WeatherData {
     int  wind_mph;
     int  wind_kph;
     char wind_dir[8];           // "N", "NW", "ESE", etc.
+    int  humidity_pct;          // current_condition[0].humidity (0-100)
+    int  chance_of_rain_pct;    // max of weather[0].hourly[*].chanceofrain (0-100)
     int  today_max_f;
     int  today_max_c;
     int  tomorrow_max_f;

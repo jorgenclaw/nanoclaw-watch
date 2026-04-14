@@ -24,6 +24,7 @@
 #include "network.h"
 #include "ui.h"
 #include "settings.h"
+#include "gps.h"
 
 // Reply buffer for HTTP responses. Sized to fit typical Jorgenclaw replies
 // (multi-paragraph responses can run several KB). Must be at least as large
@@ -146,16 +147,49 @@ void onQuickPromptPressed(int idx) {
     instance.vibrator();
     Serial.printf("[ui] grid button %d tapped\n", idx);
 
+    // Grid order: Weather, Capture, Remind, Clock, Inbox, NextEvent, WiFi,
+    // Status, DND, FindPhone, Flashlight, ScreenTest. Must stay in lockstep
+    // with GRID_LABELS[] in src/ui.cpp — index here IS the grid slot.
     switch (idx) {
-    case 0: // DND
-        setState(STATE_DND);
-        ui_showDnd();
+    case 0: // Weather
+        setState(STATE_WEATHER);
+        ui_showWeather();
         break;
-    case 1: // Clock
+    case 1: // Capture — voice memo (file to daily journal, no chat)
+        Serial.println("[ui] capture");
+        doVoiceCapture(VOICE_INTENT_MEMO);
+        break;
+    case 2: // Remind — voice-triggered scheduled reminder
+        Serial.println("[ui] remind");
+        doVoiceCapture(VOICE_INTENT_REMINDER);
+        break;
+    case 3: // Clock
         setState(STATE_CLOCK);
         ui_showClock();
         break;
-    case 2: { // Flashlight — full white screen, tap to dismiss
+    case 4: // Inbox — deferred (LVGL reentrancy — see doInbox)
+        g_pendingAction = ACTION_INBOX;
+        break;
+    case 5: // Next Event
+        Serial.println("[ui] next event — stub");
+        // TODO: show next calendar event (once protond works)
+        break;
+    case 6: // Saved WiFi manager — list + tap-to-forget
+        Serial.println("[ui] wifi manager");
+        setState(STATE_WIFI_MANAGER);
+        ui_showWifiManager();
+        break;
+    case 7: // NanoClaw Status — deferred
+        g_pendingAction = ACTION_NANOCLAW_STATUS;
+        break;
+    case 8: // DND
+        setState(STATE_DND);
+        ui_showDnd();
+        break;
+    case 9: // Find Phone — deferred
+        g_pendingAction = ACTION_FIND_PHONE;
+        break;
+    case 10: { // Flashlight — full white screen, tap to dismiss
         Serial.println("[ui] flashlight on");
         lv_obj_t* flash = lv_obj_create(NULL);
         lv_obj_set_style_bg_color(flash, lv_color_hex(0xFFFFFF), 0);
@@ -181,36 +215,6 @@ void onQuickPromptPressed(int idx) {
         touchInteraction();
         break;
     }
-    case 3: // Weather
-        setState(STATE_WEATHER);
-        ui_showWeather();
-        break;
-    case 4: // Saved WiFi manager — list + tap-to-forget
-        Serial.println("[ui] wifi manager");
-        setState(STATE_WIFI_MANAGER);
-        ui_showWifiManager();
-        break;
-    case 5: // Inbox — deferred (LVGL reentrancy — see doInbox)
-        g_pendingAction = ACTION_INBOX;
-        break;
-    case 6: // Find Phone — deferred
-        g_pendingAction = ACTION_FIND_PHONE;
-        break;
-    case 7: // Next Event
-        Serial.println("[ui] next event — stub");
-        // TODO: show next calendar event (once protond works)
-        break;
-    case 8: // Remind — voice-triggered scheduled reminder
-        Serial.println("[ui] remind");
-        doVoiceCapture(VOICE_INTENT_REMINDER);
-        break;
-    case 9: // NanoClaw Status — deferred
-        g_pendingAction = ACTION_NANOCLAW_STATUS;
-        break;
-    case 10: // Capture — voice memo (file to daily journal, no chat)
-        Serial.println("[ui] capture");
-        doVoiceCapture(VOICE_INTENT_MEMO);
-        break;
     case 11: // Screen Test — deferred
         g_pendingAction = ACTION_SCREEN_TEST;
         break;
@@ -958,6 +962,10 @@ void setup() {
     // Brightness
     instance.setBrightness(BRIGHTNESS_ACTIVE);
 
+    // GPS (T-Watch-S3-Plus only; no-op on base S3 if disabled in settings).
+    // Honors the persisted opt-in flag — default off on first boot.
+    gps_init();
+
     // App state + UI
     state_init();
     ui_init();
@@ -1006,6 +1014,7 @@ void loop() {
     }
 
     ui_tick();                // refresh clock + battery
+    gps_loop();               // pump NMEA parser when GPS is enabled
     doPoll();                 // poll host for new responses
     doNotifPoll();            // poll host for proactive notifications
 

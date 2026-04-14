@@ -6,7 +6,7 @@
 
 ## What You Have
 
-The NanoClaw Watch is a LILYGO T-Watch S3 running custom firmware that turns it into a wrist-worn voice terminal for your Jorgenclaw AI agent. You tap the blue button to talk to it, and it talks back through your Jorgenclaw host.
+The NanoClaw Watch is a LILYGO T-Watch S3 (or T-Watch S3 Plus) running custom firmware that turns it into a wrist-worn voice terminal for your Jorgenclaw AI agent. You tap the blue button to talk to it, and it talks back through your Jorgenclaw host. Both variants run the same firmware and behave identically for everything in this guide — the Plus adds a GPS receiver (off by default, opt-in from the watch) and a larger battery. See `docs/WATCH_FEATURES.md` "Watch variants" for the comparison.
 
 **What it can do right now:**
 

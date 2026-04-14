@@ -56,6 +56,15 @@ void settings_removeWifi(int slot);
 // Clear all saved WiFi networks.
 void settings_clearAllWifi();
 
+// --- GPS enabled flag (T-Watch-S3-Plus only) --------------------------------
+//
+// Persists the user's opt-in for the GPS receiver. Default on first boot is
+// FALSE — the watch never turns on GPS until the user explicitly enables it
+// from the UI. See src/gps.h for the privacy rationale.
+
+bool settings_gpsEnabled();
+void settings_setGpsEnabled(bool on);
+
 // --- Last notification timestamp (NVS-persisted across reboots) ---------------
 
 // Returns the last-polled notification timestamp (ISO 8601). Falls back to

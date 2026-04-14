@@ -3,6 +3,7 @@
 #include "state.h"
 #include "network.h"
 #include "settings.h"
+#include "gps.h"
 
 #include <LilyGoLib.h>
 #include <LV_Helper.h>
@@ -38,6 +39,7 @@ static lv_obj_t* lbl_battery      = nullptr;
 static lv_obj_t* wifi_bar1        = nullptr;  // (leftmost, lit at 1+ bars)
 static lv_obj_t* wifi_bar2        = nullptr;
 static lv_obj_t* wifi_bar3        = nullptr;  // (rightmost, lit at 3 bars)
+static lv_obj_t* gps_dot          = nullptr;  // left of wifi bars; hidden when GPS disabled
 static lv_obj_t* lbl_weather      = nullptr;  // inner label of grid button 3 (Weather)
 static lv_obj_t* speak_btn        = nullptr;
 static lv_obj_t* speak_lbl        = nullptr;  // the label *inside* the speak button — primary indicator
@@ -58,13 +60,14 @@ static lv_obj_t* dnd_status_lbl   = nullptr;
 static lv_obj_t* battery_screen   = nullptr;
 static lv_obj_t* bat_info_lbl     = nullptr;
 
-// Weather sub-screen (loaded when user taps the Weather quick button — slot 3).
+// Weather sub-screen (loaded when user taps the Weather quick button — slot 0).
 static lv_obj_t* weather_screen   = nullptr;
 static lv_obj_t* w_temp_lbl       = nullptr;  // big "57F" / "14C"
 static lv_obj_t* w_today_lbl      = nullptr;  // "Today      72F"
 static lv_obj_t* w_tomorrow_lbl   = nullptr;  // "Tomorrow   70F"
 static lv_obj_t* w_tonight_lbl    = nullptr;  // "Tonight    48F"
 static lv_obj_t* w_uv_wind_lbl    = nullptr;  // "UV 3   Wind 8 mph NW"
+static lv_obj_t* w_humid_rain_lbl = nullptr;  // "Humidity 72%  Rain 30%"
 static lv_obj_t* w_sun_lbl        = nullptr;  // "Sunrise 6:32  Sunset 7:48"
 static lv_obj_t* w_unit_btn_lbl   = nullptr;  // "F" or "C" inside the toggle btn
 
@@ -75,10 +78,11 @@ static lv_obj_t* w_unit_btn_lbl   = nullptr;  // "F" or "C" inside the toggle bt
 static WeatherData g_weatherData = {};
 static bool g_weatherValid = false;
 // Last fetch error code (or empty if last fetch succeeded). Surfaced on
-// the home button label and the weather sub-screen status line so the
-// user can see WHY a fetch failed without needing serial.
+// the home button label so the user can see WHY a fetch failed without
+// needing serial. (The sub-screen used to have a dedicated status line at
+// the bottom, but we needed the vertical space for humidity + precip
+// chance — errors now only appear on the home button and in Serial.)
 static char g_weatherErr[16] = {0};
-static lv_obj_t* w_status_lbl = nullptr;  // status line at bottom of sub-screen
 static void w_render_subscreen();
 static void update_weather_button_label();
 
@@ -130,18 +134,23 @@ static const uint32_t STEPS_CONFIRM_TIMEOUT_MS = 3000;
 // Response screen widgets
 static lv_obj_t* response_text    = nullptr;
 
+// Grid order chosen by Scott: most-used tiles (Weather, Capture, Remind,
+// Clock) occupy the four slots visible without scrolling so the common
+// actions are always one tap away, and lower-priority utilities live in
+// the rows revealed by scrolling up. Match-in-lockstep with the switch
+// in main.cpp::onQuickPromptPressed — the index here IS the case number.
 static const char* GRID_LABELS[GRID_COUNT] = {
-    "DND",             // 0 — Do Not Disturb (submenu for time selection)
-    "Clock",           // 1 — clock sub-screen (alarm/timer/stopwatch/pomodoro)
-    "Flashlight",      // 2 — white -> tap -> red -> tap -> home
-    "Weather...",      // 3 — wttr.in weather sub-screen
-    "WiFi",            // 4 — saved networks manager (list + tap-to-forget)
-    "Inbox",           // 5 — unread email summary (pushed by Jorgenclaw)
-    "Find Phone",      // 6 — ping Scott's phone via Jorgenclaw
-    "Next Event",      // 7 — next calendar event (once protond works)
-    "Remind",          // 8 — voice-triggered scheduled reminder
-    "Status",          // 9 — NanoClaw host status (reachable, uptime)
-    "Capture",         // 10 — voice memo filed to a daily journal
+    "Weather...",      // 0 — wttr.in weather sub-screen
+    "Capture",         // 1 — voice memo filed to a daily journal
+    "Remind",          // 2 — voice-triggered scheduled reminder
+    "Clock",           // 3 — clock sub-screen (alarm/timer/stopwatch/pomodoro)
+    "Inbox",           // 4 — unread email summary (pushed by Jorgenclaw)
+    "Next Event",      // 5 — next calendar event (once protond works)
+    "WiFi",            // 6 — saved networks manager (list + tap-to-forget)
+    "Status",          // 7 — NanoClaw host status (reachable, uptime)
+    "DND",             // 8 — Do Not Disturb (submenu for time selection)
+    "Find Phone",      // 9 — ping Scott's phone via Jorgenclaw
+    "Flashlight",      // 10 — white -> tap -> red -> tap -> home
     "Screen Test",     // 11 — RGB cycle for display health check (stub)
 };
 
@@ -225,8 +234,86 @@ static void build_home_screen() {
     lv_obj_set_style_bg_color(wifi_bar1, lv_color_hex(0x333333), 0);
     lv_obj_set_style_radius(wifi_bar1, 1, 0);
 
+    // GPS status dot (T-Watch-S3-Plus only). Sits to the left of the WiFi
+    // bars with a 4px visual gap. Hidden by default — only appears when the
+    // user explicitly enables GPS from settings, so the base-S3 home screen
+    // stays visually identical. When visible: dim gray = no fix, green = fix.
+    static const int DOT_SIZE = 6;
+    gps_dot = lv_obj_create(home_screen);
+    lv_obj_remove_style_all(gps_dot);
+    lv_obj_set_size(gps_dot, DOT_SIZE, DOT_SIZE);
+    lv_obj_align(gps_dot, LV_ALIGN_TOP_RIGHT,
+                 -8 - 2 * (BAR_W + BAR_GAP) - BAR_W - 4, 11);
+    lv_obj_set_style_bg_opa(gps_dot, LV_OPA_COVER, 0);
+    lv_obj_set_style_bg_color(gps_dot, lv_color_hex(0x333333), 0);
+    lv_obj_set_style_radius(gps_dot, DOT_SIZE / 2, 0);
+    lv_obj_add_flag(gps_dot, LV_OBJ_FLAG_HIDDEN);
+
+    // Scrollable button grid — 2 columns, 6 rows (12 buttons total).
+    // The first 4 buttons (2x2) are visible without scrolling; the rest
+    // are revealed by swiping up.
+    //
+    // Created BEFORE the clickable overlays below (bat_btn, speak_btn)
+    // so those widgets end up higher in LVGL's z-order and win hit
+    // testing in their own visible regions. Combined with the extended
+    // click area, grid_container absorbs touches from the full upper
+    // portion of the screen (clock area, empty chrome, gaps between
+    // widgets) so scroll gestures work no matter where the finger lands.
+    grid_container = lv_obj_create(home_screen);
+    lv_obj_remove_style_all(grid_container);
+    lv_obj_set_size(grid_container, 236, 100);  // visible height = 2 rows
+    lv_obj_align(grid_container, LV_ALIGN_TOP_MID, 0, 138);
+    lv_obj_set_style_bg_opa(grid_container, LV_OPA_TRANSP, 0);
+    lv_obj_add_flag(grid_container, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_scroll_dir(grid_container, LV_DIR_VER);
+    lv_obj_set_style_pad_all(grid_container, 0, 0);
+    // Snap scrolling so rows don't stop half-visible.
+    lv_obj_set_scroll_snap_y(grid_container, LV_SCROLL_SNAP_START);
+    // Extend the clickable hit area 138 px upward (and, harmlessly, in
+    // every other direction — off-screen extension is a no-op) so any
+    // touch in the top ~140 px also routes into grid_container. This
+    // makes scroll gestures work from the clock / date / chrome region,
+    // matching iOS/Android scroll-anywhere behavior. Widgets created
+    // after this block (bat_btn, speak_btn) stay on top in their own
+    // actual visible bounds and still handle taps normally.
+    lv_obj_set_ext_click_area(grid_container, 138);
+
+    const int btn_w = 112, btn_h = 44;
+    const int gap = 6;
+    for (int i = 0; i < GRID_COUNT; i++) {
+        int row = i / 2;
+        int col = i % 2;
+        int x = col * (btn_w + gap);
+        int y = row * (btn_h + gap);
+
+        grid_btns[i] = lv_obj_create(grid_container);
+        lv_obj_remove_style_all(grid_btns[i]);
+        lv_obj_set_size(grid_btns[i], btn_w, btn_h);
+        lv_obj_set_pos(grid_btns[i], x, y);
+        lv_obj_set_style_bg_opa(grid_btns[i], LV_OPA_COVER, 0);
+        lv_obj_set_style_bg_color(grid_btns[i], lv_color_hex(0x222222), 0);
+        lv_obj_set_style_radius(grid_btns[i], 10, 0);
+        lv_obj_add_flag(grid_btns[i], LV_OBJ_FLAG_CLICKABLE);
+        lv_obj_clear_flag(grid_btns[i], LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_add_event_cb(grid_btns[i], quick_event_cb, LV_EVENT_CLICKED,
+                            (void*)(intptr_t)i);
+
+        lv_obj_t* lbl = lv_label_create(grid_btns[i]);
+        lv_label_set_text(lbl, GRID_LABELS[i]);
+        lv_obj_set_style_text_font(lbl, &lv_font_montserrat_14, 0);
+        lv_obj_set_style_text_color(lbl, lv_color_hex(0xE8E8E8), 0);
+        lv_obj_center(lbl);
+
+        // Stash Weather button label for live updates. Weather lives
+        // at slot 0 in the grid order — top-left, always visible.
+        if (i == 0) lbl_weather = lbl;
+    }
+
     // Invisible touch overlays for long-press actions. These sit on top
     // of the labels but don't parent them, so label positioning is clean.
+    // Created AFTER grid_container so they're higher in LVGL's z-order
+    // and win hit testing in their own visible regions despite
+    // grid_container's extended click area.
     lv_obj_t* bat_btn = lv_obj_create(home_screen);
     lv_obj_remove_style_all(bat_btn);
     lv_obj_set_size(bat_btn, 120, 36);
@@ -239,33 +326,26 @@ static void build_home_screen() {
         ui_showBatteryDetail();
     }, LV_EVENT_LONG_PRESSED, NULL);
 
-    // Clock — large
-    lbl_time = lv_label_create(home_screen);
-    lv_label_set_text(lbl_time, "--:--");
-    lv_obj_set_style_text_font(lbl_time, &lv_font_montserrat_48, 0);
-    lv_obj_align(lbl_time, LV_ALIGN_TOP_MID, 0, 28);
-
-    // Date — top center, between battery (top-left) and WiFi (top-right).
-    // Was previously below the clock at y=80 but Scott moved it to the top
-    // line to fill the slot the step counter used to occupy. Same font as
-    // the battery/wifi indicators so the top bar reads as one unit.
-    lbl_date = lv_label_create(home_screen);
-    lv_label_set_text(lbl_date, "");
-    lv_obj_set_style_text_font(lbl_date, &lv_font_montserrat_14, 0);
-    lv_obj_align(lbl_date, LV_ALIGN_TOP_MID, 0, 6);
-
     // Speak button — use a plain lv_obj instead of lv_button so we get no
     // inherited theme styles at all. lv_button_create pulls in the default
     // theme's button styles (gradients, transitions, press animations) which
     // were visibly overriding my local bg_color changes. A plain obj with
     // manual styling gives us a clean flat button that actually responds to
     // bg_color updates.
+    //
+    // Sits ABOVE the clock now (was below it before 2026-04-14). Scott was
+    // mis-tapping the speak button vs the clock area when they were adjacent,
+    // so the positions were swapped: speak now sits right under the top
+    // chrome, the clock lives below it, and the grid stays pinned at y=138.
+    // The two high-frequency touch zones (speak button, grid tiles) are now
+    // cleanly separated by the full clock label in between.
     speak_btn = lv_obj_create(home_screen);
     lv_obj_remove_style_all(speak_btn);                       // nuke inherited theme
     lv_obj_set_size(speak_btn, 180, 44);
-    // Pulled up from y-offset +8 to -10 so the quick-button grid + pinned
-    // Sleep button below it have room to breathe without overlapping.
-    lv_obj_align(speak_btn, LV_ALIGN_CENTER, 0, -10);
+    // y = -62 puts the button's center at y=58 (top y=36, bottom y=80),
+    // sitting flush under the battery/wifi top chrome (y=0..36) and just
+    // above the clock label (y=84..132).
+    lv_obj_align(speak_btn, LV_ALIGN_CENTER, 0, -62);
     lv_obj_set_style_bg_opa(speak_btn, LV_OPA_COVER, 0);
     lv_obj_set_style_bg_color(speak_btn, lv_color_hex(0x3B82F6), 0);
     lv_obj_set_style_radius(speak_btn, 22, 0);
@@ -299,49 +379,19 @@ static void build_home_screen() {
     lv_obj_align(send_lbl, LV_ALIGN_RIGHT_MID, -10, 0);
     lv_obj_add_flag(send_lbl, LV_OBJ_FLAG_HIDDEN);
 
-    // Scrollable button grid — 2 columns, 6 rows (12 buttons total).
-    // The first 4 buttons (2x2) are visible without scrolling; the rest
-    // are revealed by swiping up. Larger buttons than the old 2x2 grid.
-    grid_container = lv_obj_create(home_screen);
-    lv_obj_remove_style_all(grid_container);
-    lv_obj_set_size(grid_container, 236, 100);  // visible height = 2 rows
-    lv_obj_align(grid_container, LV_ALIGN_TOP_MID, 0, 138);
-    lv_obj_set_style_bg_opa(grid_container, LV_OPA_TRANSP, 0);
-    lv_obj_add_flag(grid_container, LV_OBJ_FLAG_SCROLLABLE);
-    lv_obj_set_scroll_dir(grid_container, LV_DIR_VER);
-    lv_obj_set_style_pad_all(grid_container, 0, 0);
-    // Snap scrolling so rows don't stop half-visible.
-    lv_obj_set_scroll_snap_y(grid_container, LV_SCROLL_SNAP_START);
+    // Clock — large. Now BELOW the speak button, above the grid.
+    lbl_time = lv_label_create(home_screen);
+    lv_label_set_text(lbl_time, "--:--");
+    lv_obj_set_style_text_font(lbl_time, &lv_font_montserrat_48, 0);
+    lv_obj_align(lbl_time, LV_ALIGN_TOP_MID, 0, 84);
 
-    const int btn_w = 112, btn_h = 44;
-    const int gap = 6;
-    for (int i = 0; i < GRID_COUNT; i++) {
-        int row = i / 2;
-        int col = i % 2;
-        int x = col * (btn_w + gap);
-        int y = row * (btn_h + gap);
-
-        grid_btns[i] = lv_obj_create(grid_container);
-        lv_obj_remove_style_all(grid_btns[i]);
-        lv_obj_set_size(grid_btns[i], btn_w, btn_h);
-        lv_obj_set_pos(grid_btns[i], x, y);
-        lv_obj_set_style_bg_opa(grid_btns[i], LV_OPA_COVER, 0);
-        lv_obj_set_style_bg_color(grid_btns[i], lv_color_hex(0x222222), 0);
-        lv_obj_set_style_radius(grid_btns[i], 10, 0);
-        lv_obj_add_flag(grid_btns[i], LV_OBJ_FLAG_CLICKABLE);
-        lv_obj_clear_flag(grid_btns[i], LV_OBJ_FLAG_SCROLLABLE);
-        lv_obj_add_event_cb(grid_btns[i], quick_event_cb, LV_EVENT_CLICKED,
-                            (void*)(intptr_t)i);
-
-        lv_obj_t* lbl = lv_label_create(grid_btns[i]);
-        lv_label_set_text(lbl, GRID_LABELS[i]);
-        lv_obj_set_style_text_font(lbl, &lv_font_montserrat_14, 0);
-        lv_obj_set_style_text_color(lbl, lv_color_hex(0xE8E8E8), 0);
-        lv_obj_center(lbl);
-
-        // Stash Weather button label for live updates.
-        if (i == 3) lbl_weather = lbl;
-    }
+    // Date — top center, between battery (top-left) and WiFi (top-right).
+    // Same font as the battery/wifi indicators so the top bar reads as one
+    // unit. Position unchanged across the speak/clock swap.
+    lbl_date = lv_label_create(home_screen);
+    lv_label_set_text(lbl_date, "");
+    lv_obj_set_style_text_font(lbl_date, &lv_font_montserrat_14, 0);
+    lv_obj_align(lbl_date, LV_ALIGN_TOP_MID, 0, 6);
 }
 
 static void build_response_screen() {
@@ -909,6 +959,7 @@ static void build_alarm_screen() {
 //   Tomorrow   70F
 //   Tonight    48F                    (= weather[1].mintempF, the coming morning low)
 //   UV 3   Wind 8 mph NW              (font 14)
+//   Humidity 72%   Rain 30%           (font 14)
 //   Sunrise 6:32  Sunset 7:48         (font 12)
 //   [F]    [   Refresh   ]            (bottom row)
 //
@@ -989,6 +1040,15 @@ static void w_render_subscreen() {
                  g_weatherData.wind_dir);
         lv_label_set_text(w_uv_wind_lbl, buf);
 
+        // Humidity + chance-of-rain line. Percentages are unit-agnostic so
+        // they render the same in imperial and metric. Chance-of-rain is the
+        // max over today's 8 three-hour wttr.in hourly buckets — the single
+        // wettest window, which answers "will it rain today?" most usefully.
+        snprintf(buf, sizeof(buf), "Humidity %d%%   Rain %d%%",
+                 g_weatherData.humidity_pct,
+                 g_weatherData.chance_of_rain_pct);
+        lv_label_set_text(w_humid_rain_lbl, buf);
+
         // Sunrise / sunset line — wttr.in returns these as already-formatted
         // 12-hour strings ("06:32 AM" / "07:48 PM"), so we just concatenate.
         snprintf(buf, sizeof(buf), "Sunrise %s  Sunset %s",
@@ -1001,25 +1061,13 @@ static void w_render_subscreen() {
         lv_label_set_text(w_tomorrow_lbl, "Tomorrow   --");
         lv_label_set_text(w_tonight_lbl,  "Tonight    --");
         lv_label_set_text(w_uv_wind_lbl,  "UV --   Wind --");
+        lv_label_set_text(w_humid_rain_lbl, "Humidity --   Rain --");
         lv_label_set_text(w_sun_lbl,      "Sunrise --:--  Sunset --:--");
     }
 
     // Unit toggle button label always shows the CURRENT unit.
     if (w_unit_btn_lbl) {
         lv_label_set_text(w_unit_btn_lbl, metric ? "C" : "F");
-    }
-
-    // Status line: success or last error reason.
-    if (w_status_lbl) {
-        if (g_weatherValid) {
-            lv_label_set_text(w_status_lbl, "OK");
-        } else if (g_weatherErr[0]) {
-            char sbuf[40];
-            snprintf(sbuf, sizeof(sbuf), "Last fetch: %s", g_weatherErr);
-            lv_label_set_text(w_status_lbl, sbuf);
-        } else {
-            lv_label_set_text(w_status_lbl, "no fetch yet");
-        }
     }
 
     if (weather_screen) {
@@ -1078,21 +1126,19 @@ static void build_weather_screen() {
     lv_obj_set_style_text_font(w_uv_wind_lbl, &lv_font_montserrat_14, 0);
     lv_obj_align(w_uv_wind_lbl, LV_ALIGN_TOP_MID, 0, 152);
 
+    // Humidity + chance-of-rain line, same font as UV/Wind so the two
+    // secondary-stat rows read as a matched pair.
+    w_humid_rain_lbl = lv_label_create(weather_screen);
+    lv_label_set_text(w_humid_rain_lbl, "Humidity --   Rain --");
+    lv_obj_set_style_text_font(w_humid_rain_lbl, &lv_font_montserrat_14, 0);
+    lv_obj_align(w_humid_rain_lbl, LV_ALIGN_TOP_MID, 0, 170);
+
     // Sunrise / sunset line, smaller still.
     w_sun_lbl = lv_label_create(weather_screen);
     lv_label_set_text(w_sun_lbl, "Sunrise --:--  Sunset --:--");
     lv_obj_set_style_text_font(w_sun_lbl, &lv_font_montserrat_12, 0);
     lv_obj_set_style_text_color(w_sun_lbl, lv_color_hex(0xAAAAAA), 0);
-    lv_obj_align(w_sun_lbl, LV_ALIGN_TOP_MID, 0, 172);
-
-    // Status line — right above the buttons. Shows "OK" on success or
-    // the failure reason on failure ("HTTP 0", "no WiFi", "parse fail").
-    // Tiny and dim — diagnostic data, not chrome.
-    w_status_lbl = lv_label_create(weather_screen);
-    lv_label_set_text(w_status_lbl, "");
-    lv_obj_set_style_text_font(w_status_lbl, &lv_font_montserrat_10, 0);
-    lv_obj_set_style_text_color(w_status_lbl, lv_color_hex(0x888888), 0);
-    lv_obj_align(w_status_lbl, LV_ALIGN_TOP_MID, 0, 188);
+    lv_obj_align(w_sun_lbl, LV_ALIGN_TOP_MID, 0, 188);
 
     // Bottom row: F/C unit toggle + Refresh button.
     // Small toggle on the left, wider Refresh on the right.
@@ -2449,6 +2495,24 @@ static void update_wifi_status() {
                        lv_color_hex(bars >= 3 ? LIT_COLOR : DIM_COLOR), 0);
 }
 
+// Update the top-right GPS status dot. Hidden entirely when GPS is disabled
+// (the default), so users on the base S3 — or Plus users who haven't opted
+// in — see no extra clutter. When enabled, the dot shows gray (searching)
+// or green (have fix in the last 10 sec). Piggybacks the 2-sec WiFi cadence
+// because it's equally cheap and GPS fix state changes on a similar scale.
+static void update_gps_status() {
+    if (!gps_dot) return;
+    if (!gps_enabled()) {
+        lv_obj_add_flag(gps_dot, LV_OBJ_FLAG_HIDDEN);
+        return;
+    }
+    lv_obj_remove_flag(gps_dot, LV_OBJ_FLAG_HIDDEN);
+    const uint32_t FIX_COLOR    = 0x22C55E;  // same green as wifi_bar 3-bar state
+    const uint32_t SEARCH_COLOR = 0x555555;  // slightly brighter than wifi dim so it reads as "on"
+    lv_obj_set_style_bg_color(gps_dot,
+        lv_color_hex(gps_hasFix() ? FIX_COLOR : SEARCH_COLOR), 0);
+}
+
 void ui_tick() {
     uint32_t now = millis();
     if (now - s_lastClockUpdate > 1000) {
@@ -2462,6 +2526,7 @@ void ui_tick() {
     if (now - s_lastWifiUpdate > 2000) {
         s_lastWifiUpdate = now;
         update_wifi_status();
+        update_gps_status();
     }
     // Cheap — only does anything when a confirm is actually pending.
     update_steps_confirm_expiry();

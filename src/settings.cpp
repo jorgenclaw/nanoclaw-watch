@@ -2,11 +2,13 @@
 #include <Preferences.h>
 
 static bool s_metric = false;  // imperial default
+static bool s_gpsEnabled = false;  // opt-in, off by default (privacy)
 static WiFiCred s_wifi[WIFI_MAX_NETWORKS] = {};
 static char s_notifTs[32] = "1970-01-01T00:00:00.000Z";
 
 static const char* PREFS_NAMESPACE = "watch";
 static const char* KEY_METRIC      = "metric";
+static const char* KEY_GPS         = "gps_on";
 static const char* KEY_NOTIF_TS    = "notif_ts";
 
 // NVS keys for WiFi: ssid0..ssid9, pass0..pass9. Buffer is 8 bytes which
@@ -20,6 +22,7 @@ void settings_load() {
     Preferences prefs;
     prefs.begin(PREFS_NAMESPACE, true);  // read-only
     s_metric = prefs.getBool(KEY_METRIC, false);
+    s_gpsEnabled = prefs.getBool(KEY_GPS, false);
 
     // Load last notification timestamp
     String ts = prefs.getString(KEY_NOTIF_TS, "");
@@ -47,8 +50,8 @@ void settings_load() {
 
     int count = 0;
     for (int i = 0; i < WIFI_MAX_NETWORKS; i++) if (s_wifi[i].valid) count++;
-    Serial.printf("[settings] loaded: metric=%d  wifi_networks=%d  notif_ts=%s\n",
-                  s_metric ? 1 : 0, count, s_notifTs);
+    Serial.printf("[settings] loaded: metric=%d  gps=%d  wifi_networks=%d  notif_ts=%s\n",
+                  s_metric ? 1 : 0, s_gpsEnabled ? 1 : 0, count, s_notifTs);
 }
 
 bool settings_isMetric() {
@@ -63,6 +66,20 @@ void settings_setMetric(bool metric) {
     prefs.putBool(KEY_METRIC, metric);
     prefs.end();
     Serial.printf("[settings] saved: metric=%d\n", metric ? 1 : 0);
+}
+
+bool settings_gpsEnabled() {
+    return s_gpsEnabled;
+}
+
+void settings_setGpsEnabled(bool on) {
+    if (s_gpsEnabled == on) return;
+    s_gpsEnabled = on;
+    Preferences prefs;
+    prefs.begin(PREFS_NAMESPACE, false);
+    prefs.putBool(KEY_GPS, on);
+    prefs.end();
+    Serial.printf("[settings] saved: gps=%d\n", on ? 1 : 0);
 }
 
 const WiFiCred* settings_getWifiCreds() {

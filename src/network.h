@@ -9,6 +9,13 @@ void net_begin();              // start WiFi connect via WiFiManager (blocks on 
 bool net_isConnected();        // current WiFi link status
 void net_loop();               // call periodically; handles reconnect
 
+// Call after settings_addWifi / settings_removeWifi to resync the live
+// WiFi stack with the updated credential list. Rebuilds WiFiMulti; if
+// the current connection was the one just forgotten, disconnects,
+// wipes the ESP32 internal WiFi NVS cache (so auto-reconnect can't
+// bring it back), and kicks a reconnect to a remaining saved network.
+void net_onWifiListChanged();
+
 // --- Non-blocking config portal ---
 // Used when the watch is already running and the user wants to add/change
 // WiFi without rebooting. Launch with net_startPortalAsync(), then pump
@@ -31,6 +38,20 @@ bool net_postText(const char* prompt, char* reply_buf, size_t reply_buf_size);
 // audio_buf is the raw WAV data including the header.
 bool net_postAudio(const uint8_t* audio_buf, size_t audio_size,
                    char* reply_buf, size_t reply_buf_size);
+
+// Voice memo: POST to /api/watch/memo instead of /api/watch/message.
+// Host transcribes, files to groups/<folder>/memos/<date>.md, returns a
+// short confirmation string (e.g. "Saved (42 chars)"). No agent round-trip
+// — the intent is "just capture this, don't chat."
+bool net_postMemoAudio(const uint8_t* audio_buf, size_t audio_size,
+                       char* reply_buf, size_t reply_buf_size);
+
+// Voice reminder: POST to /api/watch/reminder. Host transcribes, parses
+// "remind me at/in X to ..." phrasings, schedules a notification to fire
+// at the parsed time, returns a confirmation string. Falls back to an
+// error message if the time can't be parsed.
+bool net_postReminderAudio(const uint8_t* audio_buf, size_t audio_size,
+                           char* reply_buf, size_t reply_buf_size);
 
 // Poll for any new responses queued at the host. Returns true if a new response
 // was retrieved into reply_buf. Non-blocking-ish (uses HTTP_TIMEOUT_MS internally).

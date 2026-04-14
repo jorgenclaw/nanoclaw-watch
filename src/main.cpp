@@ -70,8 +70,24 @@ static volatile bool g_stopRecording = false;
 // out, frees the audio buffer, and returns to home WITHOUT POSTing.
 static volatile bool g_cancelRecording = false;
 
+// Voice capture intent — dispatches the same recording loop to different
+// host endpoints so the agent (or the host itself) knows what the user
+// wanted to do with the audio.
+//   VOICE_INTENT_CHAT     — regular Speak button, goes to the agent for a
+//                           conversational reply
+//   VOICE_INTENT_MEMO     — "Capture" grid tile, goes to /api/watch/memo
+//                           and gets filed to a daily memo without a chat
+//                           round-trip
+//   VOICE_INTENT_REMINDER — "Remind" grid tile, goes to /api/watch/reminder
+//                           which parses the time and schedules a callback
+enum VoiceIntent {
+    VOICE_INTENT_CHAT = 0,
+    VOICE_INTENT_MEMO,
+    VOICE_INTENT_REMINDER,
+};
+
 // Forward declarations of work routines
-static void doVoiceCapture();
+static void doVoiceCapture(VoiceIntent intent = VOICE_INTENT_CHAT);
 static void doQuickPrompt(int idx);
 static void doPoll();
 static void doNotifPoll();
@@ -184,15 +200,16 @@ void onQuickPromptPressed(int idx) {
         Serial.println("[ui] next event — stub");
         // TODO: show next calendar event (once protond works)
         break;
-    case 8: // Clicker
-        Serial.println("[ui] clicker — stub");
-        // TODO: BLE HID presentation clicker
+    case 8: // Remind — voice-triggered scheduled reminder
+        Serial.println("[ui] remind");
+        doVoiceCapture(VOICE_INTENT_REMINDER);
         break;
     case 9: // NanoClaw Status — deferred
         g_pendingAction = ACTION_NANOCLAW_STATUS;
         break;
-    case 10: // Spotify
-        Serial.println("[ui] spotify — stub");
+    case 10: // Capture — voice memo (file to daily journal, no chat)
+        Serial.println("[ui] capture");
+        doVoiceCapture(VOICE_INTENT_MEMO);
         break;
     case 11: // Screen Test — deferred
         g_pendingAction = ACTION_SCREEN_TEST;
@@ -377,25 +394,54 @@ void onNotifDismissed() {
     ui_showHome();
 }
 
+// When the WiFi manager's "+ Add Network" button triggers the portal,
+// we want the portal to return to the manager on close/save instead
+// of home, so the user sees the newly-saved network land in the list.
+// Set by openConfigPortal(true); read by portal_return_to_origin().
+static bool g_portalFromWifiMgr = false;
+
+// Shared return path for both the user-tapped-Close case and the
+// main-loop "portal finished" case. Routes to WiFi manager if the
+// portal was entered from the manager's Add Network button, otherwise
+// back to home screen.
+static void portal_return_to_origin() {
+    if (g_portalFromWifiMgr) {
+        g_portalFromWifiMgr = false;
+        setState(STATE_WIFI_MANAGER);
+        ui_showWifiManager();
+    } else {
+        setState(STATE_HOME);
+        ui_showHome();
+    }
+}
+
 // WiFi portal screen — Close button callback.
 static void portal_close_cb(lv_event_t* e) {
     if (lv_event_get_code(e) != LV_EVENT_CLICKED) return;
     touchInteraction();
     Serial.println("[main] portal: user tapped Close");
     net_portalStop();
-    setState(STATE_HOME);
-    ui_showHome();
+    portal_return_to_origin();
 }
 
-void onWifiLongPress() {
-    if (currentState() != STATE_HOME) return;
-    Serial.println("[main] WiFi long-press — opening config portal");
+// Build the portal screen and transition into STATE_PORTAL. Callable
+// from two entry points:
+//   - onWifiLongPress() — the home-screen WiFi indicator long-press
+//     (which now first routes through the WiFi manager, but we keep
+//     this path in case the manager's button calls us directly)
+//   - the WiFi manager's "+ Add Network" button (via extern linkage
+//     from ui.cpp; sets from_wifi_mgr=true so the close path routes
+//     back to the manager instead of home)
+void openConfigPortal(bool from_wifi_mgr) {
+    Serial.printf("[main] openConfigPortal(from_wifi_mgr=%d)\n", (int)from_wifi_mgr);
     instance.vibrator();
+    g_portalFromWifiMgr = from_wifi_mgr;
 
     // Start the portal FIRST (non-blocking). If it fails to start we bail
     // without touching the UI.
     if (!net_startPortalAsync()) {
-        Serial.println("[main] portal: failed to start, staying home");
+        Serial.println("[main] portal: failed to start, staying on current screen");
+        g_portalFromWifiMgr = false;
         return;
     }
 
@@ -528,8 +574,13 @@ static void writeWavHeader(uint8_t* wav, uint32_t data_bytes, uint32_t sample_ra
     memcpy(wav + 40, &data_bytes, 4);
 }
 
-static void doVoiceCapture() {
-    Serial.println("[voice] ===== doVoiceCapture ENTER =====");
+static void doVoiceCapture(VoiceIntent intent) {
+    const char* intent_name =
+        (intent == VOICE_INTENT_MEMO)     ? "MEMO" :
+        (intent == VOICE_INTENT_REMINDER) ? "REMINDER" :
+                                            "CHAT";
+    Serial.printf("[voice] ===== doVoiceCapture ENTER (intent=%s) =====\n",
+                  intent_name);
     Serial.printf("[voice] WiFi connected = %d\n", net_isConnected() ? 1 : 0);
 
     // Immediate "button registered" feedback
@@ -697,11 +748,26 @@ static void doVoiceCapture() {
     setState(STATE_SENDING);
     ui_showSending();
     lv_task_handler();
-    Serial.println("[voice] calling net_postAudio...");
+    Serial.printf("[voice] calling net_post*Audio (intent=%s)...\n", intent_name);
 
-    bool ok = net_postAudio(wav_buffer, wav_size, g_replyBuf, sizeof(g_replyBuf));
+    bool ok;
+    switch (intent) {
+        case VOICE_INTENT_MEMO:
+            ok = net_postMemoAudio(wav_buffer, wav_size,
+                                   g_replyBuf, sizeof(g_replyBuf));
+            break;
+        case VOICE_INTENT_REMINDER:
+            ok = net_postReminderAudio(wav_buffer, wav_size,
+                                       g_replyBuf, sizeof(g_replyBuf));
+            break;
+        case VOICE_INTENT_CHAT:
+        default:
+            ok = net_postAudio(wav_buffer, wav_size,
+                               g_replyBuf, sizeof(g_replyBuf));
+            break;
+    }
     free(wav_buffer);   // mic.recordWAV returns a malloc'd buffer
-    Serial.printf("[voice] net_postAudio returned ok=%d reply='%.80s'\n",
+    Serial.printf("[voice] post returned ok=%d reply='%.80s'\n",
                   ok ? 1 : 0, g_replyBuf);
 
     if (ok) {
@@ -915,17 +981,17 @@ void loop() {
 
     // Non-blocking WiFi config portal — pump every tick while active.
     // When process() flags the portal as done (user saved creds OR
-    // timeout), tear it down and return to home. User-initiated close
-    // is handled by portal_close_cb which calls net_portalStop() + sets
-    // STATE_HOME directly.
+    // timeout), tear it down and return to wherever the user came
+    // from (home or WiFi manager, per portal_return_to_origin()).
+    // User-initiated close is handled by portal_close_cb which takes
+    // the same return path.
     if (currentState() == STATE_PORTAL) {
         net_portalProcess();
         if (!net_portalIsActive()) {
             Serial.printf("[main] portal: finished (saved=%d)\n",
                           (int)net_portalDidSave());
             net_portalStop();
-            setState(STATE_HOME);
-            ui_showHome();
+            portal_return_to_origin();
             if (net_isConnected()) net_syncTime();
         }
     }

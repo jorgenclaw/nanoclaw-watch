@@ -8,6 +8,7 @@
 #include <HTTPClient.h>
 #include <ArduinoJson.h>
 #include <time.h>
+#include <esp_wifi.h>
 
 static uint32_t s_lastReconnectAttempt = 0;
 static const uint32_t RECONNECT_INTERVAL_MS = 10000;
@@ -72,8 +73,35 @@ static bool runConfigPortal() {
 }
 
 void net_begin() {
+    // WiFi persistence model: our Preferences-backed slot storage is
+    // the sole source of truth for saved networks. The ESP32 WiFi stack
+    // keeps its OWN credential cache in a separate internal NVS
+    // namespace, which caused a real bug: when a user forgot a network
+    // via the WiFi manager UI, the forgotten SSID was still sitting in
+    // that internal cache, and on the next reboot the stack's background
+    // auto-reconnect thread brought it right back using cached creds
+    // before loadMultiCredentials() / wifiMulti had any chance to
+    // influence anything. WiFiMulti never force-disconnects an active
+    // connection even if its SSID isn't in the managed list, so the
+    // stale reconnect stuck.
+    //
+    // Fix, in order:
+    //   1. persistent(false) — future writes go to RAM only (no more
+    //      silent NVS updates from wifiMulti.run() successes)
+    //   2. mode(STA) — initializes the driver (which at init reads the
+    //      still-dirty NVS cache into RAM and kicks off auto-connect)
+    //   3. setAutoReconnect(false) — defensive, prevents the stack from
+    //      racing us while we're setting things up
+    //   4. (after migration check) explicitly zero the internal NVS
+    //      WiFi config using FLASH storage, then switch back to RAM
+    //   5. disconnect unconditionally — cancels any in-flight auto-
+    //      connect attempt regardless of whether it had completed yet
+    //   6. wifiMulti.run() — deliberate network selection from our slots
+    //   7. setAutoReconnect(true) — back on for long-term reconnect
+    //      resilience during the session
+    WiFi.persistent(false);
     WiFi.mode(WIFI_STA);
-    WiFi.setAutoReconnect(true);
+    WiFi.setAutoReconnect(false);
 
     // Load saved networks into WiFiMulti.
     loadMultiCredentials();
@@ -109,17 +137,62 @@ void net_begin() {
         }
     }
 
+    // Nuke the ESP32 internal WiFi NVS cache. We need this to happen
+    // AFTER the migration path above (which relies on reading the
+    // cached credentials via WiFi.begin() with no args) but BEFORE
+    // wifiMulti.run() below, so wifiMulti's deliberate network
+    // selection is the only thing that decides which AP we latch onto.
+    //
+    // The mechanism: temporarily flip esp_wifi_set_storage back to
+    // FLASH so the next esp_wifi_set_config() call writes through to
+    // NVS, then zero the STA config, then switch storage back to RAM
+    // so the rest of the session (wifiMulti.run successes, etc.)
+    // doesn't re-dirty NVS. After this wipe, NVS has empty creds, so
+    // next boot's driver-init auto-connect has nothing to latch onto.
+    //
+    // WiFi.disconnect(false, true) is NOT sufficient here: with
+    // storage already in RAM mode (set by WiFi.mode() above because
+    // _persistent is false), disconnect(false, true) only zeroes RAM,
+    // which doesn't affect NVS at all. That's the bug the previous
+    // fix attempt hit — the RAM write succeeded but NVS stayed dirty,
+    // so the reboot-persistence path was unfixed.
+    {
+        wifi_config_t zero_cfg = {};
+        esp_err_t r1 = esp_wifi_set_storage(WIFI_STORAGE_FLASH);
+        esp_err_t r2 = esp_wifi_set_config(WIFI_IF_STA, &zero_cfg);
+        esp_err_t r3 = esp_wifi_set_storage(WIFI_STORAGE_RAM);
+        Serial.printf("[net] wipe esp32 wifi nvs: storage(FLASH)=%d "
+                      "set_config(zero)=%d storage(RAM)=%d\n",
+                      (int)r1, (int)r2, (int)r3);
+    }
+
+    // Force-disconnect any in-progress auto-reconnection that the
+    // driver may have started between WiFi.mode() and now. The race
+    // is real: mode() kicks off a background connect attempt to
+    // whatever was in the RAM config at init time (which was loaded
+    // from the pre-wipe NVS). If we don't cancel it, wifiMulti.run()
+    // might see WL_CONNECTED to the stale network and stick with it
+    // because wifiMulti doesn't force a switch on an active link.
+    // Unconditional — no SSID check, no "is this valid?" — just drop
+    // it. wifiMulti.run() below will reconnect deliberately.
+    Serial.println("[net] force-disconnecting any stale auto-reconnect");
+    WiFi.disconnect(false, false);
+    delay(200);
+
     if (hasNetworks) {
-        if (WiFi.status() != WL_CONNECTED) {
-            // Try connecting to any of the saved networks.
-            Serial.println("[net] trying saved networks...");
-            uint32_t start = millis();
-            while (wifiMulti.run() != WL_CONNECTED &&
-                   millis() - start < WIFI_CONNECT_TIMEOUT_SEC * 1000) {
-                delay(500);
-            }
+        Serial.println("[net] trying saved networks via wifiMulti...");
+        uint32_t start = millis();
+        while (wifiMulti.run() != WL_CONNECTED &&
+               millis() - start < WIFI_CONNECT_TIMEOUT_SEC * 1000) {
+            delay(500);
         }
     }
+
+    // Re-enable auto-reconnect for the rest of the session so if the
+    // current AP drops, the stack restores the link without waiting
+    // for the main loop's 10-sec reconnect poller. Disabling it during
+    // boot was purely defensive to prevent the stale-cache race.
+    WiFi.setAutoReconnect(true);
 
     if (WiFi.status() == WL_CONNECTED) {
         Serial.printf("[net] connected to %s\n", WiFi.SSID().c_str());
@@ -137,6 +210,38 @@ void net_begin() {
 
 bool net_isConnected() {
     return WiFi.status() == WL_CONNECTED;
+}
+
+void net_onWifiListChanged() {
+    // 1. Decide whether the current connection is still legitimate
+    //    (i.e. the SSID is still in one of our valid slots).
+    String current = WiFi.SSID();
+    bool current_still_valid = false;
+    const WiFiCred* creds = settings_getWifiCreds();
+    for (int i = 0; i < WIFI_MAX_NETWORKS; i++) {
+        if (creds[i].valid && current == creds[i].ssid) {
+            current_still_valid = true;
+            break;
+        }
+    }
+
+    // 2. Rebuild WiFiMulti from the updated slot list — cheapest way
+    //    to drop a forgotten network from its internal credential table
+    //    since WiFiMulti doesn't expose a remove/clear API.
+    wifiMulti = WiFiMulti();
+    loadMultiCredentials();
+
+    if (!current_still_valid && current.length() > 0) {
+        // Current connection was the one that just got forgotten.
+        // Disconnect AND erase the ESP32 internal WiFi NVS cache so
+        // auto-reconnect can't bring the SSID right back. Then try
+        // to reconnect to a remaining saved network.
+        Serial.printf("[net] forgot current connection '%s' — dropping\n",
+                      current.c_str());
+        WiFi.disconnect(false, true);
+        delay(100);
+        wifiMulti.run();
+    }
 }
 
 void net_loop() {
@@ -283,8 +388,14 @@ bool net_postText(const char* prompt, char* reply_buf, size_t reply_buf_size) {
     return ok;
 }
 
-bool net_postAudio(const uint8_t* audio_buf, size_t audio_size,
-                   char* reply_buf, size_t reply_buf_size) {
+// Shared implementation for all three audio POST endpoints. `path` is
+// the URL suffix (e.g. "/api/watch/message", "/api/watch/memo",
+// "/api/watch/reminder"). All three endpoints share the same request
+// shape (audio/wav body + X-Watch-Token + X-Device-Id headers) and
+// response shape ({ reply: string } on 200).
+static bool postAudioTo(const char* path,
+                        const uint8_t* audio_buf, size_t audio_size,
+                        char* reply_buf, size_t reply_buf_size) {
     if (!net_isConnected()) {
         strncpy(reply_buf, "No WiFi", reply_buf_size - 1);
         return false;
@@ -295,7 +406,7 @@ bool net_postAudio(const uint8_t* audio_buf, size_t audio_size,
     }
 
     HTTPClient http;
-    String url = String(NANOCLAW_HOST_URL) + "/api/watch/message";
+    String url = String(NANOCLAW_HOST_URL) + path;
     http.begin(url);
     http.addHeader("Content-Type", "audio/wav");
     http.addHeader("X-Watch-Token", WATCH_AUTH_TOKEN);
@@ -303,7 +414,8 @@ bool net_postAudio(const uint8_t* audio_buf, size_t audio_size,
     http.setTimeout(HTTP_TIMEOUT_MS);
 
     int code = http.POST(const_cast<uint8_t*>(audio_buf), audio_size);
-    Serial.printf("[net] postAudio (%u bytes) -> %d\n", (unsigned)audio_size, code);
+    Serial.printf("[net] POST %s (%u bytes) -> %d\n",
+                  path, (unsigned)audio_size, code);
 
     bool ok = false;
     if (code == 200) {
@@ -314,6 +426,24 @@ bool net_postAudio(const uint8_t* audio_buf, size_t audio_size,
     }
     http.end();
     return ok;
+}
+
+bool net_postAudio(const uint8_t* audio_buf, size_t audio_size,
+                   char* reply_buf, size_t reply_buf_size) {
+    return postAudioTo("/api/watch/message",
+                       audio_buf, audio_size, reply_buf, reply_buf_size);
+}
+
+bool net_postMemoAudio(const uint8_t* audio_buf, size_t audio_size,
+                       char* reply_buf, size_t reply_buf_size) {
+    return postAudioTo("/api/watch/memo",
+                       audio_buf, audio_size, reply_buf, reply_buf_size);
+}
+
+bool net_postReminderAudio(const uint8_t* audio_buf, size_t audio_size,
+                           char* reply_buf, size_t reply_buf_size) {
+    return postAudioTo("/api/watch/reminder",
+                       audio_buf, audio_size, reply_buf, reply_buf_size);
 }
 
 bool net_pollForResponse(char* reply_buf, size_t reply_buf_size) {

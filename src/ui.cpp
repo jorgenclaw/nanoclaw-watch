@@ -28,7 +28,16 @@ static lv_obj_t* response_screen  = nullptr;
 static lv_obj_t* lbl_time         = nullptr;
 static lv_obj_t* lbl_date         = nullptr;
 static lv_obj_t* lbl_battery      = nullptr;
-static lv_obj_t* lbl_wifi         = nullptr;
+// Top-right WiFi indicator — just three signal-strength bars, no
+// text label. The SSID used to show next to the bars but it
+// visually collided with the date in the center of the top line,
+// and the user doesn't really need to see the network name
+// constantly — bar strength answers the only question worth
+// asking at a glance ("is my connection any good right now?").
+// WiFi management has moved exclusively to the grid tile.
+static lv_obj_t* wifi_bar1        = nullptr;  // (leftmost, lit at 1+ bars)
+static lv_obj_t* wifi_bar2        = nullptr;
+static lv_obj_t* wifi_bar3        = nullptr;  // (rightmost, lit at 3 bars)
 static lv_obj_t* lbl_weather      = nullptr;  // inner label of grid button 3 (Weather)
 static lv_obj_t* speak_btn        = nullptr;
 static lv_obj_t* speak_lbl        = nullptr;  // the label *inside* the speak button — primary indicator
@@ -130,9 +139,9 @@ static const char* GRID_LABELS[GRID_COUNT] = {
     "Inbox",           // 5 — unread email summary (pushed by Jorgenclaw)
     "Find Phone",      // 6 — ping Scott's phone via Jorgenclaw
     "Next Event",      // 7 — next calendar event (once protond works)
-    "Clicker",         // 8 — presentation slide advancer via BLE HID
+    "Remind",          // 8 — voice-triggered scheduled reminder
     "Status",          // 9 — NanoClaw host status (reachable, uptime)
-    "Spotify",         // 10 — music control (stub)
+    "Capture",         // 10 — voice memo filed to a daily journal
     "Screen Test",     // 11 — RGB cycle for display health check (stub)
 };
 
@@ -180,10 +189,41 @@ static void build_home_screen() {
     lv_obj_set_style_text_font(lbl_battery, &lv_font_montserrat_14, 0);
     lv_obj_align(lbl_battery, LV_ALIGN_TOP_LEFT, 8, 6);
 
-    lbl_wifi = lv_label_create(home_screen);
-    lv_label_set_text(lbl_wifi, "WiFi -");
-    lv_obj_set_style_text_font(lbl_wifi, &lv_font_montserrat_14, 0);
-    lv_obj_align(lbl_wifi, LV_ALIGN_TOP_RIGHT, -8, 6);
+    // WiFi status — three signal-strength bars in the top-right
+    // corner, updated in ui_tick() based on WiFi.RSSI(). No SSID
+    // text (it collided with the centered date) and no tap target
+    // (WiFi management lives on the grid tile now).
+    //
+    // Bars are 4px wide, 8px tall, 1px gap. bar1 leftmost (lit at
+    // 1+ bars of signal), bar3 rightmost (lit at 3 bars). Lit =
+    // green; unlit = dim gray. All three rectangles are always
+    // drawn so the visual footprint doesn't shift as signal changes.
+    static const int BAR_W = 4;
+    static const int BAR_H = 8;
+    static const int BAR_GAP = 1;
+    wifi_bar3 = lv_obj_create(home_screen);
+    lv_obj_remove_style_all(wifi_bar3);
+    lv_obj_set_size(wifi_bar3, BAR_W, BAR_H);
+    lv_obj_align(wifi_bar3, LV_ALIGN_TOP_RIGHT, -8, 10);
+    lv_obj_set_style_bg_opa(wifi_bar3, LV_OPA_COVER, 0);
+    lv_obj_set_style_bg_color(wifi_bar3, lv_color_hex(0x333333), 0);
+    lv_obj_set_style_radius(wifi_bar3, 1, 0);
+
+    wifi_bar2 = lv_obj_create(home_screen);
+    lv_obj_remove_style_all(wifi_bar2);
+    lv_obj_set_size(wifi_bar2, BAR_W, BAR_H);
+    lv_obj_align(wifi_bar2, LV_ALIGN_TOP_RIGHT, -8 - (BAR_W + BAR_GAP), 10);
+    lv_obj_set_style_bg_opa(wifi_bar2, LV_OPA_COVER, 0);
+    lv_obj_set_style_bg_color(wifi_bar2, lv_color_hex(0x333333), 0);
+    lv_obj_set_style_radius(wifi_bar2, 1, 0);
+
+    wifi_bar1 = lv_obj_create(home_screen);
+    lv_obj_remove_style_all(wifi_bar1);
+    lv_obj_set_size(wifi_bar1, BAR_W, BAR_H);
+    lv_obj_align(wifi_bar1, LV_ALIGN_TOP_RIGHT, -8 - 2 * (BAR_W + BAR_GAP), 10);
+    lv_obj_set_style_bg_opa(wifi_bar1, LV_OPA_COVER, 0);
+    lv_obj_set_style_bg_color(wifi_bar1, lv_color_hex(0x333333), 0);
+    lv_obj_set_style_radius(wifi_bar1, 1, 0);
 
     // Invisible touch overlays for long-press actions. These sit on top
     // of the labels but don't parent them, so label positioning is clean.
@@ -197,17 +237,6 @@ static void build_home_screen() {
         touchInteraction();
         setState(STATE_BATTERY);
         ui_showBatteryDetail();
-    }, LV_EVENT_LONG_PRESSED, NULL);
-
-    lv_obj_t* wifi_btn = lv_obj_create(home_screen);
-    lv_obj_remove_style_all(wifi_btn);
-    lv_obj_set_size(wifi_btn, 120, 36);
-    lv_obj_align(wifi_btn, LV_ALIGN_TOP_RIGHT, 0, 0);
-    lv_obj_add_flag(wifi_btn, LV_OBJ_FLAG_CLICKABLE);
-    lv_obj_clear_flag(wifi_btn, LV_OBJ_FLAG_SCROLLABLE);
-    lv_obj_add_event_cb(wifi_btn, [](lv_event_t* e) {
-        extern void onWifiLongPress();
-        onWifiLongPress();
     }, LV_EVENT_LONG_PRESSED, NULL);
 
     // Clock — large
@@ -1717,6 +1746,10 @@ static void wifi_mgr_row_cb(lv_event_t* e) {
     if (armed_and_fresh) {
         // Second tap within timeout — commit the deletion.
         settings_removeWifi(slot);
+        // Resync the live WiFi stack: rebuild WiFiMulti, and if this
+        // was the currently-connected network, disconnect + wipe
+        // ESP32 cache + reconnect to a remaining saved network.
+        net_onWifiListChanged();
         g_wifiMgrArmedSlot = -1;
     } else {
         // First tap on this slot, or arm on a different slot, or the arm
@@ -1729,6 +1762,19 @@ static void wifi_mgr_row_cb(lv_event_t* e) {
 
 static void rebuild_wifi_mgr_list() {
     if (!wifi_mgr_list_cont) return;
+    // Also refresh the "Connected: ..." header line in case the
+    // current connection changed since the screen was opened (e.g.
+    // the user just forgot the active network and WiFiMulti has
+    // now reconnected to a different saved network).
+    if (wifi_mgr_conn_lbl) {
+        char buf[80];
+        if (net_isConnected()) {
+            snprintf(buf, sizeof(buf), "Connected: %s", WiFi.SSID().c_str());
+        } else {
+            snprintf(buf, sizeof(buf), "Not connected");
+        }
+        lv_label_set_text(wifi_mgr_conn_lbl, buf);
+    }
     lv_obj_clean(wifi_mgr_list_cont);
 
     const WiFiCred* creds = settings_getWifiCreds();
@@ -1791,21 +1837,50 @@ static void build_wifi_mgr_screen() {
     lv_obj_set_style_text_font(wifi_mgr_conn_lbl, &lv_font_montserrat_12, 0);
     lv_obj_set_style_text_color(wifi_mgr_conn_lbl, lv_color_hex(0x60A5FA), 0);
     lv_label_set_text(wifi_mgr_conn_lbl, "");
-    lv_obj_align(wifi_mgr_conn_lbl, LV_ALIGN_TOP_LEFT, 12, 40);
+    lv_obj_align(wifi_mgr_conn_lbl, LV_ALIGN_TOP_LEFT, 12, 36);
 
-    lv_obj_t* help_lbl = lv_label_create(wifi_mgr_screen);
-    lv_obj_set_style_text_font(help_lbl, &lv_font_montserrat_12, 0);
-    lv_obj_set_style_text_color(help_lbl, lv_color_hex(0x94A3B8), 0);
-    lv_label_set_text(help_lbl, "Tap twice to forget a network");
-    lv_obj_align(help_lbl, LV_ALIGN_TOP_LEFT, 12, 58);
-
+    // Scrollable list of saved networks. Shrunk from 150 → 125 tall
+    // to make room for the "+ Add Network" button fixed at the bottom.
+    // Shows ~3 rows at a time; user scrolls vertically for the rest.
+    // (Helper text "Tap twice to forget a network" removed — the
+    // tap-to-arm red row with "Tap again: <ssid>" is self-teaching
+    // and the same info lives in docs/USER_GUIDE.md.)
     wifi_mgr_list_cont = lv_obj_create(wifi_mgr_screen);
     lv_obj_remove_style_all(wifi_mgr_list_cont);
-    lv_obj_set_size(wifi_mgr_list_cont, 230, 150);
-    lv_obj_align(wifi_mgr_list_cont, LV_ALIGN_TOP_LEFT, 5, 78);
+    lv_obj_set_size(wifi_mgr_list_cont, 230, 125);
+    lv_obj_align(wifi_mgr_list_cont, LV_ALIGN_TOP_LEFT, 5, 56);
     lv_obj_set_style_bg_opa(wifi_mgr_list_cont, LV_OPA_TRANSP, 0);
     lv_obj_add_flag(wifi_mgr_list_cont, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_scroll_dir(wifi_mgr_list_cont, LV_DIR_VER);
+
+    // "+ Add Network" fixed button at the bottom. Launches the captive
+    // portal via main.cpp's openConfigPortal() with from_wifi_mgr=true
+    // so the portal close/save path routes back to this screen and the
+    // user sees the newly-added network land in the list.
+    lv_obj_t* add_btn = lv_obj_create(wifi_mgr_screen);
+    lv_obj_remove_style_all(add_btn);
+    lv_obj_set_size(add_btn, 200, 34);
+    lv_obj_align(add_btn, LV_ALIGN_BOTTOM_MID, 0, -6);
+    lv_obj_set_style_bg_opa(add_btn, LV_OPA_COVER, 0);
+    lv_obj_set_style_bg_color(add_btn, lv_color_hex(0x22C55E), 0);
+    lv_obj_set_style_radius(add_btn, 10, 0);
+    lv_obj_add_flag(add_btn, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_clear_flag(add_btn, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_event_cb(add_btn, [](lv_event_t* e) {
+        if (lv_event_get_code(e) != LV_EVENT_CLICKED) return;
+        touchInteraction();
+        g_wifiMgrArmedSlot = -1;  // clear any in-progress delete arm
+        // Hand off to main.cpp's portal opener. The bool tells the
+        // close path to come back here instead of home.
+        extern void openConfigPortal(bool from_wifi_mgr);
+        openConfigPortal(true);
+    }, LV_EVENT_CLICKED, NULL);
+
+    lv_obj_t* add_lbl = lv_label_create(add_btn);
+    lv_label_set_text(add_lbl, "+ Add new network");
+    lv_obj_set_style_text_font(add_lbl, &lv_font_montserrat_14, 0);
+    lv_obj_set_style_text_color(add_lbl, lv_color_hex(0x0F172A), 0);
+    lv_obj_center(add_lbl);
 }
 
 void ui_showWifiManager() {
@@ -2296,6 +2371,7 @@ void ui_showError(const char* text) {
 
 static uint32_t s_lastClockUpdate = 0;
 static uint32_t s_lastBatteryUpdate = 0;
+static uint32_t s_lastWifiUpdate = 0;
 
 static void update_clock() {
     time_t now;
@@ -2339,10 +2415,38 @@ static void update_battery() {
     snprintf(buf, sizeof(buf), "%s%d%%", charging ? "+" : "BAT ", pct);
     lv_label_set_text(lbl_battery, buf);
 
-    lv_label_set_text(lbl_wifi, net_isConnected() ? "WiFi OK" : "WiFi -");
-
     // (Steps button removed — pedometer still runs for future use but
     // no longer has a home-screen label to update.)
+}
+
+// Update the top-right WiFi signal-strength bars. Runs on its
+// own 2-second cadence from ui_tick() because WiFi state changes
+// more frequently than the 30-sec battery update interval.
+//
+// RSSI → bar count thresholds chosen for typical 2.4 GHz indoor use:
+//     RSSI >= -60 dBm → 3 bars (excellent, same room as AP)
+//     RSSI >= -72 dBm → 2 bars (good, next room)
+//     RSSI >= -85 dBm → 1 bar  (weak but usable, across the house)
+//     RSSI <  -85 dBm → 0 bars (poor, may not transmit reliably)
+//     (not connected at all) → 0 bars
+static void update_wifi_status() {
+    const uint32_t LIT_COLOR = 0x22C55E;  // green when bar is active
+    const uint32_t DIM_COLOR = 0x333333;  // near-black when inactive
+
+    int bars = 0;
+    if (net_isConnected()) {
+        int rssi = WiFi.RSSI();
+        if      (rssi >= -60) bars = 3;
+        else if (rssi >= -72) bars = 2;
+        else if (rssi >= -85) bars = 1;
+    }
+
+    if (wifi_bar1) lv_obj_set_style_bg_color(wifi_bar1,
+                       lv_color_hex(bars >= 1 ? LIT_COLOR : DIM_COLOR), 0);
+    if (wifi_bar2) lv_obj_set_style_bg_color(wifi_bar2,
+                       lv_color_hex(bars >= 2 ? LIT_COLOR : DIM_COLOR), 0);
+    if (wifi_bar3) lv_obj_set_style_bg_color(wifi_bar3,
+                       lv_color_hex(bars >= 3 ? LIT_COLOR : DIM_COLOR), 0);
 }
 
 void ui_tick() {
@@ -2354,6 +2458,10 @@ void ui_tick() {
     if (now - s_lastBatteryUpdate > 30000) {
         s_lastBatteryUpdate = now;
         update_battery();
+    }
+    if (now - s_lastWifiUpdate > 2000) {
+        s_lastWifiUpdate = now;
+        update_wifi_status();
     }
     // Cheap — only does anything when a confirm is actually pending.
     update_steps_confirm_expiry();

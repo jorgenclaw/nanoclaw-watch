@@ -9,7 +9,9 @@ static const char* PREFS_NAMESPACE = "watch";
 static const char* KEY_METRIC      = "metric";
 static const char* KEY_NOTIF_TS    = "notif_ts";
 
-// NVS keys for WiFi: ssid0/pass0, ssid1/pass1, ssid2/pass2
+// NVS keys for WiFi: ssid0..ssid9, pass0..pass9. Buffer is 8 bytes which
+// fits a 4-char prefix + 2-digit index + null — good up to 99 slots if we
+// ever need more.
 static void wifiKey(const char* prefix, int idx, char* out) {
     snprintf(out, 8, "%s%d", prefix, idx);
 }
@@ -84,12 +86,19 @@ void settings_addWifi(const char* ssid, const char* password) {
             goto save;
         }
     }
-    // All slots full — shift down (drop oldest at slot 0) and use slot 2.
-    s_wifi[0] = s_wifi[1];
-    s_wifi[1] = s_wifi[2];
-    strncpy(s_wifi[2].ssid, ssid, sizeof(s_wifi[2].ssid) - 1);
-    strncpy(s_wifi[2].pass, password, sizeof(s_wifi[2].pass) - 1);
-    s_wifi[2].valid = true;
+    // All slots full — shift down (drop oldest at slot 0) and use the
+    // last slot for the new entry. Wrapped in a block so the `last`
+    // declaration doesn't get jumped over by earlier `goto save` paths
+    // (C++ forbids jumping over initializations).
+    {
+        for (int i = 0; i < WIFI_MAX_NETWORKS - 1; i++) {
+            s_wifi[i] = s_wifi[i + 1];
+        }
+        int last = WIFI_MAX_NETWORKS - 1;
+        strncpy(s_wifi[last].ssid, ssid, sizeof(s_wifi[last].ssid) - 1);
+        strncpy(s_wifi[last].pass, password, sizeof(s_wifi[last].pass) - 1);
+        s_wifi[last].valid = true;
+    }
 
 save:
     Preferences prefs;
@@ -108,6 +117,24 @@ save:
     }
     prefs.end();
     Serial.printf("[settings] saved wifi: %s\n", ssid);
+}
+
+void settings_removeWifi(int slot) {
+    if (slot < 0 || slot >= WIFI_MAX_NETWORKS) return;
+    if (!s_wifi[slot].valid) return;
+    Serial.printf("[settings] forgetting wifi slot %d: %s\n",
+                  slot, s_wifi[slot].ssid);
+    s_wifi[slot].valid = false;
+    s_wifi[slot].ssid[0] = '\0';
+    s_wifi[slot].pass[0] = '\0';
+    Preferences prefs;
+    prefs.begin(PREFS_NAMESPACE, false);
+    char kssid[8], kpass[8];
+    wifiKey("ssid", slot, kssid);
+    wifiKey("pass", slot, kpass);
+    prefs.remove(kssid);
+    prefs.remove(kpass);
+    prefs.end();
 }
 
 void settings_clearAllWifi() {

@@ -110,6 +110,13 @@ bool ui_pomodoroIsRunning();
 // --- Battery detail ---
 void ui_showBatteryDetail();
 
+// --- WiFi Manager ---
+// Scrollable list of saved networks with tap-to-forget. The first tap on
+// a row arms deletion (row turns red, label changes to "Tap again to
+// forget"). A second tap within WIFI_FORGET_TIMEOUT_MS deletes the
+// credential. Inaction or tapping a different row cancels the arm.
+void ui_showWifiManager();
+
 // Callbacks fired by UI buttons. Defined in main.cpp.
 extern void onSpeakButtonPressed();
 extern void onQuickPromptPressed(int idx);   // idx = 0..3

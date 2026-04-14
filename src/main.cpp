@@ -169,30 +169,11 @@ void onQuickPromptPressed(int idx) {
         setState(STATE_WEATHER);
         ui_showWeather();
         break;
-    case 4: { // Network info — use static buffer so text persists on screen
-        Serial.println("[ui] network info");
-        static char info[256];
-        const WiFiCred* creds = settings_getWifiCreds();
-        int pos = 0;
-        if (net_isConnected()) {
-            pos += snprintf(info + pos, sizeof(info) - pos,
-                "Connected: %s\nIP: %s\nSignal: %d dBm\n\n",
-                WiFi.SSID().c_str(),
-                WiFi.localIP().toString().c_str(),
-                WiFi.RSSI());
-        } else {
-            pos += snprintf(info + pos, sizeof(info) - pos, "Not connected\n\n");
-        }
-        pos += snprintf(info + pos, sizeof(info) - pos, "Saved networks:\n");
-        for (int i = 0; i < WIFI_MAX_NETWORKS; i++) {
-            if (creds[i].valid)
-                pos += snprintf(info + pos, sizeof(info) - pos, "  %d. %s\n", i+1, creds[i].ssid);
-        }
-        setLastResponse(info);
-        setState(STATE_RESPONSE);
-        ui_showResponse(info);
+    case 4: // Saved WiFi manager — list + tap-to-forget
+        Serial.println("[ui] wifi manager");
+        setState(STATE_WIFI_MANAGER);
+        ui_showWifiManager();
         break;
-    }
     case 5: // Inbox — deferred (LVGL reentrancy — see doInbox)
         g_pendingAction = ACTION_INBOX;
         break;

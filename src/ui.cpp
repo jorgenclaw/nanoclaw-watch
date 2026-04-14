@@ -6,6 +6,7 @@
 
 #include <LilyGoLib.h>
 #include <LV_Helper.h>
+#include <WiFi.h>
 #include <time.h>
 #include <esp_heap_caps.h>
 
@@ -125,7 +126,7 @@ static const char* GRID_LABELS[GRID_COUNT] = {
     "Clock",           // 1 — clock sub-screen (alarm/timer/stopwatch/pomodoro)
     "Flashlight",      // 2 — white -> tap -> red -> tap -> home
     "Weather...",      // 3 — wttr.in weather sub-screen
-    "Network",         // 4 — WiFi info (SSID, IP, signal, saved networks)
+    "WiFi",            // 4 — saved networks manager (list + tap-to-forget)
     "Inbox",           // 5 — unread email summary (pushed by Jorgenclaw)
     "Find Phone",      // 6 — ping Scott's phone via Jorgenclaw
     "Next Event",      // 7 — next calendar event (once protond works)
@@ -1137,6 +1138,13 @@ static void pom_update_picker() {
 
 static void pom_update_display() {
     if (!pom_time_lbl) return;
+    // Keep the Start/Stop button label in sync with the actual running
+    // state. Needed because the timer can now change state while the
+    // pomodoro screen isn't visible (phase transitions from pom_tick),
+    // so the button must catch up when the user returns.
+    if (pom_start_lbl) {
+        lv_label_set_text(pom_start_lbl, g_pomRunning ? "Stop" : "Start");
+    }
     if (!g_pomRunning) {
         lv_label_set_text(pom_time_lbl, "--:--");
         if (pom_phase_lbl) lv_label_set_text(pom_phase_lbl, "Ready");
@@ -1189,8 +1197,11 @@ static void pom_tick() {
 static void pom_close_cb(lv_event_t* e) {
     if (lv_event_get_code(e) != LV_EVENT_CLICKED) return;
     touchInteraction();
-    // Stop the pomodoro when closing
-    g_pomRunning = false;
+    // Keep the pomodoro running in the background. pom_tick() continues
+    // to advance via ui_tick() -> ui_clockTick() regardless of which
+    // screen is loaded, and ui_pomodoroIsRunning() keeps dim-mode entry
+    // suppressed at main.cpp so phase transitions and the buzz at the
+    // end still fire. User can return to the screen to see the state.
     setState(STATE_CLOCK);
     ui_showClock();
 }
@@ -1672,6 +1683,158 @@ static void build_battery_screen() {
 }
 
 // =============================================================================
+// WiFi Manager — saved networks list with tap-to-arm, tap-again-to-forget
+// =============================================================================
+
+static lv_obj_t* wifi_mgr_screen    = nullptr;
+static lv_obj_t* wifi_mgr_conn_lbl  = nullptr;
+static lv_obj_t* wifi_mgr_list_cont = nullptr;
+static int32_t   g_wifiMgrArmedSlot = -1;
+static uint32_t  g_wifiMgrArmMs     = 0;
+static const uint32_t WIFI_FORGET_TIMEOUT_MS = 3000;
+
+static void rebuild_wifi_mgr_list();
+
+static void wifi_mgr_close_cb(lv_event_t* e) {
+    if (lv_event_get_code(e) != LV_EVENT_CLICKED) return;
+    touchInteraction();
+    g_wifiMgrArmedSlot = -1;
+    setState(STATE_HOME);
+    ui_showHome();
+}
+
+static void wifi_mgr_row_cb(lv_event_t* e) {
+    if (lv_event_get_code(e) != LV_EVENT_CLICKED) return;
+    touchInteraction();
+    int slot = (int)(intptr_t)lv_event_get_user_data(e);
+    const WiFiCred* creds = settings_getWifiCreds();
+    if (slot < 0 || slot >= WIFI_MAX_NETWORKS || !creds[slot].valid) return;
+
+    bool armed_and_fresh =
+        (g_wifiMgrArmedSlot == slot) &&
+        (millis() - g_wifiMgrArmMs <= WIFI_FORGET_TIMEOUT_MS);
+
+    if (armed_and_fresh) {
+        // Second tap within timeout — commit the deletion.
+        settings_removeWifi(slot);
+        g_wifiMgrArmedSlot = -1;
+    } else {
+        // First tap on this slot, or arm on a different slot, or the arm
+        // had expired — arm this row and wait for the confirming tap.
+        g_wifiMgrArmedSlot = slot;
+        g_wifiMgrArmMs = millis();
+    }
+    rebuild_wifi_mgr_list();
+}
+
+static void rebuild_wifi_mgr_list() {
+    if (!wifi_mgr_list_cont) return;
+    lv_obj_clean(wifi_mgr_list_cont);
+
+    const WiFiCred* creds = settings_getWifiCreds();
+    int row_y = 0;
+    int row_count = 0;
+    for (int i = 0; i < WIFI_MAX_NETWORKS; i++) {
+        if (!creds[i].valid) continue;
+        bool armed = (g_wifiMgrArmedSlot == i);
+
+        lv_obj_t* row = lv_obj_create(wifi_mgr_list_cont);
+        lv_obj_remove_style_all(row);
+        lv_obj_set_size(row, 220, 34);
+        lv_obj_set_pos(row, 0, row_y);
+        lv_obj_set_style_bg_opa(row, LV_OPA_COVER, 0);
+        lv_obj_set_style_bg_color(row,
+            lv_color_hex(armed ? 0xDC2626 : 0x1F2937), 0);
+        lv_obj_set_style_radius(row, 8, 0);
+        lv_obj_add_flag(row, LV_OBJ_FLAG_CLICKABLE);
+        lv_obj_clear_flag(row, LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_add_event_cb(row, wifi_mgr_row_cb, LV_EVENT_CLICKED,
+                            (void*)(intptr_t)i);
+
+        lv_obj_t* lbl = lv_label_create(row);
+        char text[96];
+        if (armed) {
+            snprintf(text, sizeof(text), "Tap again: %s", creds[i].ssid);
+        } else {
+            snprintf(text, sizeof(text), "%d. %s", i + 1, creds[i].ssid);
+        }
+        lv_label_set_text(lbl, text);
+        lv_obj_set_style_text_font(lbl, &lv_font_montserrat_14, 0);
+        lv_obj_set_style_text_color(lbl, lv_color_hex(0xE8E8E8), 0);
+        lv_label_set_long_mode(lbl, LV_LABEL_LONG_DOT);
+        lv_obj_set_width(lbl, 204);
+        lv_obj_align(lbl, LV_ALIGN_LEFT_MID, 8, 0);
+
+        row_y += 38;
+        row_count++;
+    }
+
+    if (row_count == 0) {
+        lv_obj_t* empty_lbl = lv_label_create(wifi_mgr_list_cont);
+        lv_label_set_text(empty_lbl, "No saved networks");
+        lv_obj_set_style_text_font(empty_lbl, &lv_font_montserrat_14, 0);
+        lv_obj_set_style_text_color(empty_lbl, lv_color_hex(0x94A3B8), 0);
+        lv_obj_align(empty_lbl, LV_ALIGN_TOP_MID, 0, 20);
+    }
+}
+
+static void build_wifi_mgr_screen() {
+    wifi_mgr_screen = lv_obj_create(NULL);
+    lv_obj_set_style_bg_color(wifi_mgr_screen, lv_color_hex(0x000000), 0);
+    lv_obj_set_style_text_color(wifi_mgr_screen, lv_color_hex(0xE8E8E8), 0);
+    lv_obj_clear_flag(wifi_mgr_screen, LV_OBJ_FLAG_SCROLLABLE);
+
+    make_title(wifi_mgr_screen, "Saved WiFi");
+    make_close_btn(wifi_mgr_screen, wifi_mgr_close_cb);
+
+    wifi_mgr_conn_lbl = lv_label_create(wifi_mgr_screen);
+    lv_obj_set_style_text_font(wifi_mgr_conn_lbl, &lv_font_montserrat_12, 0);
+    lv_obj_set_style_text_color(wifi_mgr_conn_lbl, lv_color_hex(0x60A5FA), 0);
+    lv_label_set_text(wifi_mgr_conn_lbl, "");
+    lv_obj_align(wifi_mgr_conn_lbl, LV_ALIGN_TOP_LEFT, 12, 40);
+
+    lv_obj_t* help_lbl = lv_label_create(wifi_mgr_screen);
+    lv_obj_set_style_text_font(help_lbl, &lv_font_montserrat_12, 0);
+    lv_obj_set_style_text_color(help_lbl, lv_color_hex(0x94A3B8), 0);
+    lv_label_set_text(help_lbl, "Tap twice to forget a network");
+    lv_obj_align(help_lbl, LV_ALIGN_TOP_LEFT, 12, 58);
+
+    wifi_mgr_list_cont = lv_obj_create(wifi_mgr_screen);
+    lv_obj_remove_style_all(wifi_mgr_list_cont);
+    lv_obj_set_size(wifi_mgr_list_cont, 230, 150);
+    lv_obj_align(wifi_mgr_list_cont, LV_ALIGN_TOP_LEFT, 5, 78);
+    lv_obj_set_style_bg_opa(wifi_mgr_list_cont, LV_OPA_TRANSP, 0);
+    lv_obj_add_flag(wifi_mgr_list_cont, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_scroll_dir(wifi_mgr_list_cont, LV_DIR_VER);
+}
+
+void ui_showWifiManager() {
+    g_wifiMgrArmedSlot = -1;
+    if (wifi_mgr_conn_lbl) {
+        char buf[80];
+        if (net_isConnected()) {
+            snprintf(buf, sizeof(buf), "Connected: %s", WiFi.SSID().c_str());
+        } else {
+            snprintf(buf, sizeof(buf), "Not connected");
+        }
+        lv_label_set_text(wifi_mgr_conn_lbl, buf);
+    }
+    rebuild_wifi_mgr_list();
+    lv_screen_load(wifi_mgr_screen);
+}
+
+// Called from ui_tick — clears an expired arm so the red row visually
+// reverts to normal even if the user doesn't tap anything.
+static void wifi_mgr_tick() {
+    if (currentState() != STATE_WIFI_MANAGER) return;
+    if (g_wifiMgrArmedSlot >= 0 &&
+        millis() - g_wifiMgrArmMs > WIFI_FORGET_TIMEOUT_MS) {
+        g_wifiMgrArmedSlot = -1;
+        rebuild_wifi_mgr_list();
+    }
+}
+
+// =============================================================================
 
 static lv_obj_t* notif_banner       = nullptr;
 static lv_obj_t* notif_banner_from  = nullptr;
@@ -1796,6 +1959,7 @@ void ui_init() {
     build_dnd_custom_screen();
     build_pomodoro_screen();
     build_battery_screen();
+    build_wifi_mgr_screen();
     build_notif_banner();
     build_notif_detail_screen();
     lv_screen_load(home_screen);
@@ -2202,4 +2366,7 @@ void ui_tick() {
     // stopwatch keep advancing even when their screens are closed and the
     // user is back on the home screen. Alarm check is throttled internally.
     ui_clockTick();
+    // Expire any armed WiFi-forget row after 3 sec so the red state doesn't
+    // linger visually.
+    wifi_mgr_tick();
 }

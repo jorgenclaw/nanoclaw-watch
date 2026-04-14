@@ -24,9 +24,15 @@ void settings_load();
 bool settings_isMetric();
 void settings_setMetric(bool metric);
 
-// --- Multi-network WiFi credentials (up to 3 saved networks) ----------------
+// --- Multi-network WiFi credentials (up to 10 saved networks) ---------------
+//
+// Privacy note: every saved network is actively probed by the ESP32 on
+// reconnect, which broadcasts the SSID over the air in the clear. A wrist
+// watch can't hide behind a VPN — anyone within radio range of the watch can
+// passively log its probe list. So we expose a "forget" button in the UI
+// (see ui_showWifiManager) to let users purge networks they no longer visit.
 
-static const int WIFI_MAX_NETWORKS = 3;
+static const int WIFI_MAX_NETWORKS = 10;
 
 struct WiFiCred {
     char ssid[64];
@@ -34,12 +40,18 @@ struct WiFiCred {
     bool valid;   // true if this slot has credentials
 };
 
-// Returns the array of 3 credential slots (loaded from NVS by settings_load).
+// Returns the array of WIFI_MAX_NETWORKS credential slots (loaded from NVS).
 const WiFiCred* settings_getWifiCreds();
 
-// Save a new network. Writes to the first empty slot; if all 3 are full,
+// Save a new network. Writes to the first empty slot; if all slots are full,
 // overwrites the oldest (slot 0, shifting the others down).
 void settings_addWifi(const char* ssid, const char* password);
+
+// Forget a single saved network by slot index. Invalidates the slot and
+// persists to NVS. Other slots are left in place — the gap will be reused
+// by the next settings_addWifi() call (which prefers empty slots over
+// the shift-down path).
+void settings_removeWifi(int slot);
 
 // Clear all saved WiFi networks.
 void settings_clearAllWifi();

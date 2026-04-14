@@ -19,6 +19,8 @@ enum WatchState {
     STATE_DND_CUSTOM,  // DND custom duration picker (sub-sub-screen)
     STATE_BATTERY,     // battery/system info detail screen
     STATE_POMODORO,    // Pomodoro timer (work/rest cycles)
+    STATE_WIFI_MANAGER,// saved-networks list with tap-to-forget
+    STATE_PORTAL,      // WiFi captive portal running (main loop pumps wm.process())
     STATE_ERROR        // generic error display
 };
 

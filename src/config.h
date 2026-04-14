@@ -92,8 +92,7 @@
 
 // --- Display ---
 #define BRIGHTNESS_ACTIVE  200  // 0-255, screen brightness when awake
-#define BRIGHTNESS_DIM       0  // backlight fully off (CPU stays on so
-                                // notifications + wake word keep working)
+#define BRIGHTNESS_DIM     40   // 0-255, dimmed during inactivity countdown
 
 // --- Timezone offset for clock display (seconds) ---
 // Pacific Standard Time = -8 * 3600. PDT = -7 * 3600.
@@ -101,16 +100,6 @@
 
 // --- NTP sync ---
 #define NTP_SERVER         "pool.ntp.org"
-
-// --- Wake word ("Hey Jorgenclaw") ---
-// When enabled, the wake_word FreeRTOS task runs continuously on core 0
-// and classifies ambient audio against the Edge Impulse model in
-// lib/Jorgenclaw-project-1_inferencing. On a match, the main loop starts
-// a voice recording — same flow as tapping the blue button.
-//
-// Limitation: only works while the watch is AWAKE. Light sleep halts the
-// task with the rest of the CPU. Tap the screen first to wake, then speak.
-#define WAKE_WORD_ENABLED    true
 
 // --- Weather ---
 // Location string passed to wttr.in. Use "City,State" or "City,Country" or

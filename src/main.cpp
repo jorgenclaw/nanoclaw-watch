@@ -24,7 +24,6 @@
 #include "network.h"
 #include "ui.h"
 #include "settings.h"
-#include "wake_word.h"
 
 // Reply buffer for HTTP responses. Sized to fit typical Jorgenclaw replies
 // (multi-paragraph responses can run several KB). Must be at least as large
@@ -47,10 +46,20 @@ static uint32_t g_lastNotifPollMs = 0;
 uint32_t g_dndUntil = 0;
 static WatchNotification g_notifBuf[3];
 static bool g_powerKeyPressed = false;
-static bool g_dimMode = false;
-// Set true on wake from dim — suppress LVGL input processing until the
-// finger lifts so the wake touch doesn't accidentally press a button.
-static bool g_waitForLift = false;
+
+// Deferred button actions. LVGL 9.x can't reentrantly flush the display
+// from within an event callback, so button handlers that do blocking
+// work (HTTP POST, touch-poll loops, lv_refr_now) must set a flag and
+// return immediately. The main loop() checks the flag and runs the
+// work outside the LVGL call stack. Same pattern as g_powerKeyPressed.
+enum PendingAction {
+    ACTION_NONE = 0,
+    ACTION_INBOX,
+    ACTION_FIND_PHONE,
+    ACTION_NANOCLAW_STATUS,
+    ACTION_SCREEN_TEST,
+};
+static volatile PendingAction g_pendingAction = ACTION_NONE;
 // Set to true by the recording loop's direct touch poll (or as a fallback
 // by onSpeakButtonPressed via the LVGL CLICK path) when the user taps the
 // SEND zone of the speak button while recording. doVoiceCapture() breaks
@@ -67,8 +76,7 @@ static void doQuickPrompt(int idx);
 static void doPoll();
 static void doNotifPoll();
 static void doWeatherFetch();
-static void enterDimMode();
-static void exitDimMode();
+static void enterLightSleep();
 
 // =============================================================================
 // Device event handler — fires from instance.loop() on hardware interrupts
@@ -185,54 +193,11 @@ void onQuickPromptPressed(int idx) {
         ui_showResponse(info);
         break;
     }
-    case 5: // Inbox — ask Jorgenclaw to check Proton email
-        Serial.println("[ui] inbox check");
-        ui_showSending();
-        lv_refr_now(NULL);
-        {
-            char reply[4096];
-            bool ok = net_postText(
-                "SYSTEM: Scott tapped 'Inbox' on his watch. "
-                "Check the Proton Mail inbox and give a brief "
-                "summary of unread emails (sender and subject, "
-                "max 5). If no unread, say 'Inbox clear'.",
-                reply, sizeof(reply));
-            if (ok && reply[0]) {
-                setLastResponse(reply);
-                setState(STATE_RESPONSE);
-                ui_showResponse(reply);
-            } else if (ok) {
-                ui_showError("Inbox clear");
-            } else {
-                ui_showError("Host unreachable");
-            }
-        }
-        touchInteraction();
+    case 5: // Inbox — deferred (LVGL reentrancy — see doInbox)
+        g_pendingAction = ACTION_INBOX;
         break;
-    case 6: // Find Phone — ask Jorgenclaw to ping Scott
-        Serial.println("[ui] find phone");
-        ui_showSending();
-        lv_refr_now(NULL);
-        {
-            char reply[512];
-            bool ok = net_postText(
-                "SYSTEM: Scott pressed 'Find Phone' on his watch. "
-                "Send a Signal message to Scott that says "
-                "'FIND MY PHONE - ring ring!' so his phone buzzes.",
-                reply, sizeof(reply));
-            if (ok) {
-                ui_showSent();
-                lv_refr_now(NULL);
-                delay(1500);
-            } else {
-                ui_showError("Host unreachable");
-                lv_refr_now(NULL);
-                delay(2000);
-            }
-        }
-        setState(STATE_HOME);
-        ui_showHome();
-        touchInteraction();
+    case 6: // Find Phone — deferred
+        g_pendingAction = ACTION_FIND_PHONE;
         break;
     case 7: // Next Event
         Serial.println("[ui] next event — stub");
@@ -242,83 +207,152 @@ void onQuickPromptPressed(int idx) {
         Serial.println("[ui] clicker — stub");
         // TODO: BLE HID presentation clicker
         break;
-    case 9: { // NanoClaw Status — ping host
-        Serial.println("[ui] nanoclaw status");
-        if (!net_isConnected()) {
-            ui_showError("No WiFi");
-            break;
-        }
-        ui_showSending();
-        lv_refr_now(NULL);
-        uint32_t t0 = millis();
-        char reply[512];
-        bool ok = net_postText(
-            "SYSTEM: Scott tapped 'Status' on his watch. "
-            "Reply with a one-line status: uptime, last agent "
-            "run time, and how many messages today.",
-            reply, sizeof(reply));
-        uint32_t ping_ms = millis() - t0;
-        if (ok && reply[0]) {
-            char info[600];
-            snprintf(info, sizeof(info),
-                     "Host: reachable (%lums)\n\n%s",
-                     (unsigned long)ping_ms, reply);
-            setLastResponse(info);
-            setState(STATE_RESPONSE);
-            ui_showResponse(info);
-        } else {
-            char info[128];
-            snprintf(info, sizeof(info),
-                     "Host: %s (%lums)",
-                     ok ? "no response" : "unreachable",
-                     (unsigned long)ping_ms);
-            ui_showError(info);
-        }
-        touchInteraction();
+    case 9: // NanoClaw Status — deferred
+        g_pendingAction = ACTION_NANOCLAW_STATUS;
         break;
-    }
     case 10: // Spotify
         Serial.println("[ui] spotify — stub");
         break;
-    case 11: { // Screen Test — cycle R, G, B, W, Black; tap to advance
-        Serial.println("[ui] screen test");
-        const uint32_t colors[] = { 0xFF0000, 0x00FF00, 0x0000FF, 0xFFFFFF, 0x000000 };
-        const char* names[]     = { "RED",    "GREEN",  "BLUE",   "WHITE",  "BLACK" };
-        instance.setBrightness(255);
-        int16_t tx, ty;
-        // Wait for initial button-press finger to lift
-        while (instance.getPoint(&tx, &ty, 1) > 0) delay(10);
-        delay(100);
-        for (int c = 0; c < 5; c++) {
-            // Create a fresh screen for each color so lv_screen_load
-            // triggers a clean transition.
-            lv_obj_t* scr = lv_obj_create(NULL);
-            lv_obj_set_style_bg_color(scr, lv_color_hex(colors[c]), 0);
-            lv_obj_set_style_bg_opa(scr, LV_OPA_COVER, 0);
-            lv_obj_clear_flag(scr, LV_OBJ_FLAG_SCROLLABLE);
-            lv_obj_t* lbl = lv_label_create(scr);
-            lv_obj_set_style_text_font(lbl, &lv_font_montserrat_18, 0);
-            bool dark_bg = (colors[c] == 0x0000FF || colors[c] == 0xFF0000 || colors[c] == 0x000000);
-            lv_obj_set_style_text_color(lbl, lv_color_hex(dark_bg ? 0xFFFFFF : 0x000000), 0);
-            lv_label_set_text_fmt(lbl, "%s\n\nTap for next", names[c]);
-            lv_label_set_long_mode(lbl, LV_LABEL_LONG_WRAP);
-            lv_obj_set_style_text_align(lbl, LV_TEXT_ALIGN_CENTER, 0);
-            lv_obj_set_width(lbl, 200);
-            lv_obj_center(lbl);
-            lv_screen_load(scr);
-            lv_refr_now(NULL);
-            // Wait for tap
-            while (instance.getPoint(&tx, &ty, 1) == 0) delay(10);
-            while (instance.getPoint(&tx, &ty, 1) > 0) delay(10);
-            lv_obj_delete(scr);
-        }
-        instance.setBrightness(BRIGHTNESS_ACTIVE);
-        setState(STATE_HOME);
-        ui_showHome();
-        lv_refr_now(NULL);
-        touchInteraction();
+    case 11: // Screen Test — deferred
+        g_pendingAction = ACTION_SCREEN_TEST;
         break;
     }
+}
+
+// =============================================================================
+// Deferred button handlers — run from loop(), NOT from an LVGL callback.
+// These do blocking work (HTTP POST, touch polling, lv_refr_now) that
+// LVGL 9.x can't handle reentrantly when invoked from a button event.
+// =============================================================================
+
+static void doInbox() {
+    Serial.println("[ui] inbox check (deferred)");
+    ui_showSending();
+    lv_refr_now(NULL);
+    char reply[4096];
+    bool ok = net_postText(
+        "SYSTEM: Scott tapped 'Inbox' on his watch. "
+        "Check the Proton Mail inbox and give a brief "
+        "summary of unread emails (sender and subject, "
+        "max 5). If no unread, say 'Inbox clear'.",
+        reply, sizeof(reply));
+    if (ok && reply[0]) {
+        setLastResponse(reply);
+        setState(STATE_RESPONSE);
+        ui_showResponse(reply);
+    } else if (ok) {
+        ui_showError("Inbox clear");
+    } else {
+        ui_showError("Host unreachable");
+    }
+    touchInteraction();
+}
+
+static void doFindPhone() {
+    Serial.println("[ui] find phone (deferred)");
+    ui_showSending();
+    lv_refr_now(NULL);
+    char reply[512];
+    bool ok = net_postText(
+        "SYSTEM: Scott pressed 'Find Phone' on his watch. "
+        "Send a Signal message to Scott that says "
+        "'FIND MY PHONE - ring ring!' so his phone buzzes.",
+        reply, sizeof(reply));
+    if (ok) {
+        ui_showSent();
+        lv_refr_now(NULL);
+        delay(1500);
+    } else {
+        ui_showError("Host unreachable");
+        lv_refr_now(NULL);
+        delay(2000);
+    }
+    setState(STATE_HOME);
+    ui_showHome();
+    touchInteraction();
+}
+
+static void doNanoclawStatus() {
+    Serial.println("[ui] nanoclaw status (deferred)");
+    if (!net_isConnected()) {
+        ui_showError("No WiFi");
+        return;
+    }
+    ui_showSending();
+    lv_refr_now(NULL);
+    uint32_t t0 = millis();
+    char reply[512];
+    bool ok = net_postText(
+        "SYSTEM: Scott tapped 'Status' on his watch. "
+        "Reply with a one-line status: uptime, last agent "
+        "run time, and how many messages today.",
+        reply, sizeof(reply));
+    uint32_t ping_ms = millis() - t0;
+    if (ok && reply[0]) {
+        char info[600];
+        snprintf(info, sizeof(info),
+                 "Host: reachable (%lums)\n\n%s",
+                 (unsigned long)ping_ms, reply);
+        setLastResponse(info);
+        setState(STATE_RESPONSE);
+        ui_showResponse(info);
+    } else {
+        char info[128];
+        snprintf(info, sizeof(info),
+                 "Host: %s (%lums)",
+                 ok ? "no response" : "unreachable",
+                 (unsigned long)ping_ms);
+        ui_showError(info);
+    }
+    touchInteraction();
+}
+
+static void doScreenTest() {
+    Serial.println("[ui] screen test (deferred)");
+    const uint32_t colors[] = { 0xFF0000, 0x00FF00, 0x0000FF, 0xFFFFFF, 0x000000 };
+    const char* names[]     = { "RED",    "GREEN",  "BLUE",   "WHITE",  "BLACK" };
+    instance.setBrightness(255);
+    int16_t tx, ty;
+    // Wait for the original button-press finger to lift.
+    while (instance.getPoint(&tx, &ty, 1) > 0) delay(10);
+    delay(100);
+    for (int c = 0; c < 5; c++) {
+        lv_obj_t* scr = lv_obj_create(NULL);
+        lv_obj_set_style_bg_color(scr, lv_color_hex(colors[c]), 0);
+        lv_obj_set_style_bg_opa(scr, LV_OPA_COVER, 0);
+        lv_obj_clear_flag(scr, LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_t* lbl = lv_label_create(scr);
+        lv_obj_set_style_text_font(lbl, &lv_font_montserrat_18, 0);
+        bool dark_bg = (colors[c] == 0x0000FF || colors[c] == 0xFF0000 || colors[c] == 0x000000);
+        lv_obj_set_style_text_color(lbl, lv_color_hex(dark_bg ? 0xFFFFFF : 0x000000), 0);
+        lv_label_set_text_fmt(lbl, "%s\n\nTap for next", names[c]);
+        lv_label_set_long_mode(lbl, LV_LABEL_LONG_WRAP);
+        lv_obj_set_style_text_align(lbl, LV_TEXT_ALIGN_CENTER, 0);
+        lv_obj_set_width(lbl, 200);
+        lv_obj_center(lbl);
+        lv_screen_load(scr);
+        lv_refr_now(NULL);
+        while (instance.getPoint(&tx, &ty, 1) == 0) delay(10);
+        while (instance.getPoint(&tx, &ty, 1) > 0) delay(10);
+        lv_obj_delete(scr);
+    }
+    instance.setBrightness(BRIGHTNESS_ACTIVE);
+    setState(STATE_HOME);
+    ui_showHome();
+    lv_refr_now(NULL);
+    touchInteraction();
+}
+
+static void runPendingAction() {
+    PendingAction action = g_pendingAction;
+    if (action == ACTION_NONE) return;
+    g_pendingAction = ACTION_NONE;
+    switch (action) {
+        case ACTION_INBOX:            doInbox();          break;
+        case ACTION_FIND_PHONE:       doFindPhone();      break;
+        case ACTION_NANOCLAW_STATUS:  doNanoclawStatus(); break;
+        case ACTION_SCREEN_TEST:      doScreenTest();     break;
+        default: break;
     }
 }
 
@@ -329,7 +363,20 @@ void onSleepButtonPressed() {
     if (currentState() != STATE_HOME) return;
     Serial.println("[ui] sleep button pressed");
     instance.vibrator();
-    enterDimMode();
+    // CRITICAL: wait for the user's finger to leave the screen before
+    // entering light sleep. WAKEUP_SRC_TOUCH_PANEL fires on any active
+    // touch — if we sleep while the finger is still down, the panel
+    // wakes the chip back up within milliseconds. Poll the touch chip
+    // until it reports 0 points (or 3 sec safety timeout).
+    int16_t tx = 0, ty = 0;
+    uint32_t wait_start = millis();
+    while (instance.getPoint(&tx, &ty, 1) > 0 &&
+           millis() - wait_start < 3000) {
+        delay(10);
+    }
+    delay(150);  // extra debounce so the touch IRQ has settled
+    Serial.println("[ui] finger released, entering sleep");
+    enterLightSleep();
 }
 
 // The newest notification is cached in g_notifBuf[latest] by doNotifPoll,
@@ -349,41 +396,77 @@ void onNotifDismissed() {
     ui_showHome();
 }
 
+// WiFi portal screen — Close button callback.
+static void portal_close_cb(lv_event_t* e) {
+    if (lv_event_get_code(e) != LV_EVENT_CLICKED) return;
+    touchInteraction();
+    Serial.println("[main] portal: user tapped Close");
+    net_portalStop();
+    setState(STATE_HOME);
+    ui_showHome();
+}
+
 void onWifiLongPress() {
     if (currentState() != STATE_HOME) return;
     Serial.println("[main] WiFi long-press — opening config portal");
     instance.vibrator();
-    // Show setup instructions on the watch. Use a dedicated screen so
-    // the text isn't truncated by the speak button.
-    {
-        lv_obj_t* scr = lv_obj_create(NULL);
-        lv_obj_set_style_bg_color(scr, lv_color_hex(0x000000), 0);
-        lv_obj_clear_flag(scr, LV_OBJ_FLAG_SCROLLABLE);
-        lv_obj_t* t = lv_label_create(scr);
-        lv_obj_set_style_text_font(t, &lv_font_montserrat_18, 0);
-        lv_obj_set_style_text_color(t, lv_color_hex(0xE8E8E8), 0);
-        lv_label_set_text(t, "WiFi Setup");
-        lv_obj_align(t, LV_ALIGN_TOP_MID, 0, 20);
-        lv_obj_t* body = lv_label_create(scr);
-        lv_obj_set_style_text_font(body, &lv_font_montserrat_14, 0);
-        lv_obj_set_style_text_color(body, lv_color_hex(0xAAAAAA), 0);
-        lv_label_set_long_mode(body, LV_LABEL_LONG_WRAP);
-        lv_obj_set_width(body, 220);
-        lv_label_set_text(body,
-            "On your phone, connect\n"
-            "to WiFi network:\n\n"
-            SETUP_AP_NAME "\n\n"
-            "Then open a browser.\n\n"
-            "Side button = cancel");
-        lv_obj_align(body, LV_ALIGN_TOP_MID, 0, 50);
-        lv_screen_load(scr);
-        lv_refr_now(NULL);
+
+    // Start the portal FIRST (non-blocking). If it fails to start we bail
+    // without touching the UI.
+    if (!net_startPortalAsync()) {
+        Serial.println("[main] portal: failed to start, staying home");
+        return;
     }
-    net_startConfigPortal();
-    // Portal returned — either connected or rebooting. Go home.
-    setState(STATE_HOME);
-    ui_showHome();
-    net_syncTime();
+
+    // Build the portal screen: header, instructions, Close button.
+    lv_obj_t* scr = lv_obj_create(NULL);
+    lv_obj_set_style_bg_color(scr, lv_color_hex(0x000000), 0);
+    lv_obj_clear_flag(scr, LV_OBJ_FLAG_SCROLLABLE);
+
+    // Header
+    lv_obj_t* t = lv_label_create(scr);
+    lv_obj_set_style_text_font(t, &lv_font_montserrat_18, 0);
+    lv_obj_set_style_text_color(t, lv_color_hex(0xE8E8E8), 0);
+    lv_label_set_text(t, "WiFi Setup");
+    lv_obj_align(t, LV_ALIGN_TOP_LEFT, 8, 12);
+
+    // Close button (matches response_screen / clock_screen pattern)
+    lv_obj_t* close_btn = lv_obj_create(scr);
+    lv_obj_remove_style_all(close_btn);
+    lv_obj_set_size(close_btn, 44, 32);
+    lv_obj_align(close_btn, LV_ALIGN_TOP_RIGHT, -4, 4);
+    lv_obj_set_style_bg_opa(close_btn, LV_OPA_COVER, 0);
+    lv_obj_set_style_bg_color(close_btn, lv_color_hex(0x222222), 0);
+    lv_obj_set_style_radius(close_btn, 8, 0);
+    lv_obj_add_flag(close_btn, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_clear_flag(close_btn, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_event_cb(close_btn, portal_close_cb, LV_EVENT_CLICKED, NULL);
+    lv_obj_t* close_lbl = lv_label_create(close_btn);
+    lv_label_set_text(close_lbl, "Close");
+    lv_obj_set_style_text_font(close_lbl, &lv_font_montserrat_14, 0);
+    lv_obj_set_style_text_color(close_lbl, lv_color_hex(0xE8E8E8), 0);
+    lv_obj_center(close_lbl);
+
+    // Body — plain instructions, no misleading side-button hint
+    lv_obj_t* body = lv_label_create(scr);
+    lv_obj_set_style_text_font(body, &lv_font_montserrat_14, 0);
+    lv_obj_set_style_text_color(body, lv_color_hex(0xAAAAAA), 0);
+    lv_label_set_long_mode(body, LV_LABEL_LONG_WRAP);
+    lv_obj_set_width(body, 220);
+    lv_label_set_text(body,
+        "On your phone, connect\n"
+        "to WiFi network:\n\n"
+        SETUP_AP_NAME "\n\n"
+        "Then open a browser\n"
+        "and follow the prompts.\n\n"
+        "Tap Close when done.");
+    lv_obj_align(body, LV_ALIGN_TOP_MID, 0, 52);
+
+    lv_screen_load(scr);
+
+    // Enter STATE_PORTAL — the main loop() will pump net_portalProcess()
+    // every tick until the portal completes or the user taps Close.
+    setState(STATE_PORTAL);
 }
 
 void onResponseDismissed() {
@@ -742,16 +825,6 @@ static void doNotifPoll() {
     WatchNotification& newest = g_notifBuf[g_latestNotifIdx];
     ui_showNotifBanner(newest.from, newest.preview, newest.full_text);
 
-    // Wake the screen if dimmed — notifications should be visible.
-    if (g_dimMode) {
-        g_dimMode = false;  // clear directly (not exitDimMode) to avoid
-                            // the justWoke guard — we WANT LVGL to render
-        instance.setBrightness(BRIGHTNESS_ACTIVE);
-    }
-
-    // Flush LVGL so the banner is visible immediately.
-    lv_refr_now(NULL);
-
     // Double-buzz notification pattern (distinct from single confirmation buzz).
     // Suppressed during DND — banner still shows, just no haptic.
     if (g_dndUntil == 0 || millis() >= g_dndUntil) {
@@ -786,24 +859,26 @@ static void configureMotionWake() {
     instance.sensor.enablePedometer();
 }
 
-// Dim mode: backlight to minimum but CPU stays running. This keeps
-// notification polling, wake word detection, and timers alive while
-// appearing "off" to the user. A touch or power key press wakes it.
-// If battery life is unacceptable, switch to option 2: periodic light
-// sleep with timer wakeup (see project memory).
-static void enterDimMode() {
-    if (g_dimMode) return;
-    Serial.println("[main] entering dim mode");
-    instance.setBrightness(BRIGHTNESS_DIM);
-    g_dimMode = true;
-}
-
-static void exitDimMode() {
-    if (!g_dimMode) return;
-    Serial.println("[main] exiting dim mode");
+static void enterLightSleep() {
+    Serial.println("[main] entering light sleep");
+    // WAKEUP_SRC_SENSOR is deliberately OMITTED. We tried re-enabling it
+    // for tilt-to-wake on 2026-04-10 and confirmed via serial trace that
+    // the BMA423 fires its sensor wakeup IRQ within milliseconds of
+    // entering sleep — same-second wake-up, screen never visibly dims,
+    // user perceives "sleep doesn't work". The simple "just turn it on"
+    // approach does NOT work no matter how we filter the events on the
+    // wake side.
+    //
+    // The path forward for tilt-to-wake (filed in project memory) is to
+    // use BMA423's dedicated BMA4_WRIST_WEAR_WAKE_UP interrupt (a different
+    // sensor feature than generic motion wakeup), which fires only on a
+    // deliberate wrist-raise gesture instead of any vibration. That
+    // requires investigating the LilyGo SensorBMA423 wrapper API to find
+    // the right enable call. Until then, wake on power key + touch only.
+    instance.lightSleep((WakeupSource_t)(WAKEUP_SRC_POWER_KEY |
+                                         WAKEUP_SRC_TOUCH_PANEL));
+    Serial.println("[main] woke from light sleep");
     instance.setBrightness(BRIGHTNESS_ACTIVE);
-    g_dimMode = false;
-    g_waitForLift = true;  // suppress LVGL input until finger lifts
     touchInteraction();
 }
 
@@ -841,62 +916,37 @@ void setup() {
     ui_init();
 
     // Network — may block if no saved credentials (captive portal).
-    // Runs BEFORE the EI heap allocation so the portal has full PSRAM.
     net_begin();
     setState(STATE_HOME);
     ui_showHome();
-
-    // Reserve PSRAM for the EI tensor arena AFTER WiFi connects and
-    // LilyGoLib is initialized. Must run before wake_word_task_start().
-    // The earlier this ran (as the first line of setup), the captive
-    // portal would crash because the 3 MB EI heap + LilyGoLib's ~5 MB
-    // left no PSRAM for WiFiManager's web server. Moving it here means
-    // the portal runs with full PSRAM, and the EI heap grabs its 3 MB
-    // only after WiFi is settled.
-    wake_word_preallocate();
-
-    // Wake word ("Hey Jorgenclaw") — start the always-on inference task.
-    // Runs on core 0, shares the PDM mic with the recording loop via a
-    // STATE_HOME guard (pauses when recording is active). Only works
-    // while the chip is awake; light sleep pauses this task with
-    // everything else.
-#if WAKE_WORD_ENABLED
-    wake_word_task_start();
-#endif
 
     Serial.println("[main] setup complete");
 }
 
 void loop() {
     instance.loop();          // handles hardware events -> device_event_cb
+    lv_task_handler();        // LVGL tick
 
-    // When dimmed, skip LVGL tick so touch events don't accidentally
-    // trigger buttons on the black screen. After wake, keep skipping
-    // input until the finger lifts — otherwise the wake touch triggers
-    // whatever button is underneath.
-    if (!g_dimMode) {
-        if (g_waitForLift) {
-            int16_t tx, ty;
-            if (instance.getPoint(&tx, &ty, 1) == 0) {
-                // Finger lifted — safe to resume normal LVGL processing.
-                g_waitForLift = false;
-            }
-            // Render-only while waiting (no input processing).
-            lv_refr_now(NULL);
-        } else {
-            lv_task_handler();    // LVGL tick (touch + redraw)
+    // Deferred button actions — queued by LVGL event callbacks that
+    // can't safely run blocking work (HTTP, touch polling, lv_refr_now)
+    // from inside the callback. See enum PendingAction above.
+    runPendingAction();
+
+    // Non-blocking WiFi config portal — pump every tick while active.
+    // When process() flags the portal as done (user saved creds OR
+    // timeout), tear it down and return to home. User-initiated close
+    // is handled by portal_close_cb which calls net_portalStop() + sets
+    // STATE_HOME directly.
+    if (currentState() == STATE_PORTAL) {
+        net_portalProcess();
+        if (!net_portalIsActive()) {
+            Serial.printf("[main] portal: finished (saved=%d)\n",
+                          (int)net_portalDidSave());
+            net_portalStop();
+            setState(STATE_HOME);
+            ui_showHome();
+            if (net_isConnected()) net_syncTime();
         }
-    }
-
-    // Wake word check — if the wake_word task flagged a detection, kick
-    // off a voice capture immediately (same code path as tapping the
-    // blue speak button). Only processes in STATE_HOME because
-    // doVoiceCapture assumes that's where we start.
-    if (wake_word_triggered() && currentState() == STATE_HOME) {
-        Serial.println("[main] wake word -> voice capture");
-        if (g_dimMode) exitDimMode();
-        touchInteraction();
-        doVoiceCapture();
     }
 
     net_loop();               // WiFi reconnect logic
@@ -929,27 +979,10 @@ void loop() {
         }
     }
 
-    // Handle power key: toggle dim mode.
+    // Handle queued power-key sleep request
     if (g_powerKeyPressed) {
         g_powerKeyPressed = false;
-        if (g_dimMode) {
-            exitDimMode();
-        } else {
-            enterDimMode();
-        }
-    }
-
-    // Wake from dim mode on any touch. Poll the touch panel directly
-    // (not through LVGL, which is paused in dim mode). Check multiple
-    // times per loop to catch brief taps that might land between polls.
-    if (g_dimMode) {
-        int16_t tx, ty;
-        bool touched = false;
-        for (int i = 0; i < 5 && !touched; i++) {
-            if (instance.getPoint(&tx, &ty, 1) > 0) touched = true;
-            else delay(1);
-        }
-        if (touched) exitDimMode();
+        enterLightSleep();
     }
 
     // Diagnostic: print idle progress every 5 sec while in HOME state.
@@ -978,7 +1011,7 @@ void loop() {
     if (currentState() == STATE_HOME &&
         millis() - lastInteractionMs() > IDLE_SLEEP_MS) {
         if (!ui_timerIsRunning() && !ui_alarmIsImminent(60) && !ui_pomodoroIsRunning()) {
-            enterDimMode();
+            enterLightSleep();
         }
     }
 

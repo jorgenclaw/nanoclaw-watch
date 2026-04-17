@@ -72,6 +72,8 @@ The firmware runs on both variants of the LilyGo T-Watch S3:
 
 Full walkthrough: [`NEXT_STEPS.md`](NEXT_STEPS.md)
 Everything the firmware can do: [`docs/WATCH_FEATURES.md`](docs/WATCH_FEATURES.md)
+Daily use and troubleshooting: [`docs/USER_GUIDE.md`](docs/USER_GUIDE.md)
+Should you put 2FA codes on your wrist? [`docs/TOTP_TRADEOFFS.md`](docs/TOTP_TRADEOFFS.md)
 
 > 💡 **Feeling stuck or not sure where to start?** Point your AI agent — Claude Code, Cursor, Copilot, or any coding assistant — at this repo and say: *"Read the README and NEXT_STEPS.md and tell me what to do first."* Ask it to explain each step before you do it. You don't need to understand all of this upfront — a good AI agent will walk you through it and teach you along the way.
 

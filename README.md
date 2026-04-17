@@ -100,7 +100,12 @@ We source the hardware, flash the firmware, and do the initial setup. You receiv
 
 > 🔒 **Want privacy?** Send an end-to-end encrypted DM via [NIP-17](https://github.com/nostr-protocol/nips/blob/master/17.md) (Gift Wrap). Supported by all major Nostr clients — [Primal](https://primal.net), [Amethyst](https://github.com/vitorpamplona/amethyst), and [Ditto](https://ditto.pub) included. Your message is encrypted before it leaves your device — no relay sees the content.
 
-Pricing covers hardware, flashing, testing, and shipping. Availability subject to parts in stock.
+| Model | Price | Includes |
+|-------|-------|---------|
+| T-Watch S3 | $160 | Hardware, firmware, testing, US shipping |
+| T-Watch S3 Plus ⭐ | $190 | Hardware, firmware, testing, US shipping + GPS |
+
+Availability subject to parts in stock.
 
 ---
 

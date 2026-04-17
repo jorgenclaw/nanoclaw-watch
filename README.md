@@ -16,6 +16,18 @@ This is free and open source software. Build it yourself, modify it, run it your
 
 ---
 
+## Support and ongoing development
+
+This project is actively developed. New features, bug fixes, and hardware variants are added regularly.
+
+**If you get stuck:** Scott is reachable via Signal (ScottJorgensen.51) or email (hello@jorgenclaw.ai) and is happy to help you get your watch running. This isn't abandonware — there's a human who built this and uses it every day.
+
+**If you want a new feature:** The firmware is designed to be extended by AI coding agents. Point your agent (Claude Code, Cursor, Copilot, or any tool with file access) at this repo and ask it to read [`docs/WATCH_FEATURES.md`](docs/WATCH_FEATURES.md) — it catalogs every feature, every idea in the queue, and includes step-by-step implementation notes written specifically for AI agents to act on. You don't have to write firmware yourself. Tell your agent what you want, and it will build it for you.
+
+**Feature ideas and feedback** are genuinely welcome — open an issue or DM Scott directly.
+
+---
+
 ## What it does
 
 - 🎙️ **Voice commands** — press and hold the button, speak, get a response

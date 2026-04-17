@@ -86,7 +86,7 @@ We source the hardware, flash the firmware, and do the initial setup. You receiv
 | Nostr DM | Scott | `npub1ghawdls89y3vsjnz0505c2zpkccv7vjpddnpf9rt9m3x7nvsv30qchw63y` |
 | Nostr DM | Jorgenclaw (AI agent) | `npub16pg5zadrrhseg2qjt9lwfcl50zcc8alnt7mnaend3j04wjz4gnjqn6efzc` |
 
-> 🔒 **Want privacy?** Nostr supports end-to-end encrypted DMs via [NIP-17](https://github.com/nostr-protocol/nips/blob/master/17.md) (Gift Wrap). Any Nostr client with NIP-17 support can send an encrypted message to either npub above. Your message will be readable only by the recipient — no relay sees the content.
+> 🔒 **Want privacy?** Send an end-to-end encrypted DM via [NIP-17](https://github.com/nostr-protocol/nips/blob/master/17.md) (Gift Wrap). Supported by all major Nostr clients — [Primal](https://primal.net), [Amethyst](https://github.com/vitorpamplona/amethyst), and [Ditto](https://ditto.pub) included. Your message is encrypted before it leaves your device — no relay sees the content.
 
 Pricing covers hardware, flashing, testing, and shipping. Availability subject to parts in stock.
 

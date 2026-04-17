@@ -1006,11 +1006,20 @@ void loop() {
 
     net_loop();               // WiFi reconnect logic
 
-    // First-time NTP sync once we get WiFi
-    static bool ntpDone = false;
-    if (!ntpDone && net_isConnected()) {
-        net_syncTime();
-        ntpDone = true;
+    // Hourly NTP resync to counter RTC drift (~2-4 min/day on ESP32).
+    // Initial sync and reconnect sync are handled inside net_loop();
+    // this is belt-and-suspenders for watches that stay connected for
+    // days — without it, drift is only corrected on a WiFi hiccup.
+    static uint32_t lastNtpResyncMs = 0;
+    if (net_isConnected() &&
+        (lastNtpResyncMs == 0 ||
+         millis() - lastNtpResyncMs > NTP_RESYNC_INTERVAL_MS)) {
+        // Skip the very first call here — net_loop already synced on
+        // the reconnect transition. Just start the timer.
+        if (lastNtpResyncMs != 0) {
+            net_syncTime();
+        }
+        lastNtpResyncMs = millis();
     }
 
     ui_tick();                // refresh clock + battery

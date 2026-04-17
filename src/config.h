@@ -94,12 +94,20 @@
 #define BRIGHTNESS_ACTIVE  200  // 0-255, screen brightness when awake
 #define BRIGHTNESS_DIM     40   // 0-255, dimmed during inactivity countdown
 
-// --- Timezone offset for clock display (seconds) ---
-// Pacific Standard Time = -8 * 3600. PDT = -7 * 3600.
-#define TZ_OFFSET_SECONDS  (-7 * 3600)
+// --- Timezone (POSIX TZ string, handles DST automatically) ---
+// Format: STD<offset>DST,<start>,<end> where offset is UTC - local in STANDARD time.
+// "PST8PDT,M3.2.0,M11.1.0" = Pacific, PST=UTC-8, PDT=UTC-7,
+// DST starts 2nd Sunday of March, ends 1st Sunday of November.
+// Change if you move, or if US DST rules change.
+#define TZ_POSIX           "PST8PDT,M3.2.0,M11.1.0"
 
 // --- NTP sync ---
 #define NTP_SERVER         "pool.ntp.org"
+
+// How often to re-sync time from NTP (ms). ESP32's internal RTC drifts
+// ~2-4 min/day, so an hourly resync keeps the clock accurate even if
+// the watch stays up for weeks.
+#define NTP_RESYNC_INTERVAL_MS  (60UL * 60UL * 1000UL)
 
 // --- Weather ---
 // Location string passed to wttr.in. Use "City,State" or "City,Country" or

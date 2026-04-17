@@ -252,6 +252,9 @@ void net_loop() {
                 WiFi.localIP().toString().c_str(),
                 WiFi.gatewayIP().toString().c_str(),
                 WiFi.subnetMask().toString().c_str());
+            // WiFi just came up (initial or reconnect). Resync time now
+            // so the RTC is correct as soon as the watch is online.
+            net_syncTime();
             printed_ip = true;
         }
         return;
@@ -330,9 +333,12 @@ bool net_portalDidSave()  { return s_portalSaved; }
 
 void net_syncTime() {
     if (!net_isConnected()) return;
-    Serial.println("[net] syncing time via NTP...");
-    configTime(TZ_OFFSET_SECONDS, 0, NTP_SERVER);
-    // Don't block — let the NTP daemon update time in the background.
+    Serial.println("[net] syncing time via NTP (DST-aware)...");
+    configTzTime(TZ_POSIX, NTP_SERVER);
+    // Don't block — SNTP daemon updates time in the background.
+    // We also trigger re-sync on every WiFi reconnect (below) and
+    // hourly from main loop as belt-and-suspenders, in case SNTP
+    // silently stops updating on a long-running watch.
 }
 
 // Internal: parse a JSON response from the host into reply_buf.

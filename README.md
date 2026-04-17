@@ -75,7 +75,7 @@ We source the hardware, flash the firmware, and do the initial setup. You receiv
 - ⚡ Lightning (instant, low-fee Bitcoin)
 - ₿ Bitcoin on-chain
 - ɱ Monero (XMR) — for maximum privacy
-- Ł Litecoin (LTC)
+- Ł Litecoin (LTC) — on-chain or MWeb extension for privacy
 
 **To order or ask questions:**
 

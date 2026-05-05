@@ -59,6 +59,7 @@ enum PendingAction {
     ACTION_FIND_PHONE,
     ACTION_NANOCLAW_STATUS,
     ACTION_SCREEN_TEST,
+    ACTION_OTA_UPDATE,
 };
 static volatile PendingAction g_pendingAction = ACTION_NONE;
 // Set to true by the recording loop's direct touch poll (or as a fallback
@@ -170,9 +171,10 @@ void onQuickPromptPressed(int idx) {
     case 4: // Inbox — deferred (LVGL reentrancy — see doInbox)
         g_pendingAction = ACTION_INBOX;
         break;
-    case 5: // Next Event
-        Serial.println("[ui] next event — stub");
-        // TODO: show next calendar event (once protond works)
+    case 5: // IR Remote
+        Serial.println("[ui] IR remote");
+        setState(STATE_IR_REMOTE);
+        ui_showIrRemote();
         break;
     case 6: // Saved WiFi manager — list + tap-to-forget
         Serial.println("[ui] wifi manager");
@@ -215,8 +217,8 @@ void onQuickPromptPressed(int idx) {
         touchInteraction();
         break;
     }
-    case 11: // Screen Test — deferred
-        g_pendingAction = ACTION_SCREEN_TEST;
+    case 11: // OTA Update — deferred
+        g_pendingAction = ACTION_OTA_UPDATE;
         break;
     }
 }
@@ -286,15 +288,19 @@ static void doNanoclawStatus() {
     char reply[512];
     bool ok = net_postText(
         "SYSTEM: Scott tapped 'Status' on his watch. "
-        "Reply with a one-line status: uptime, last agent "
-        "run time, and how many messages today.",
+        "Keep it short for a tiny screen. Reply with:\n"
+        "1. Are you online? (just 'Online' or 'Busy')\n"
+        "2. Last active: how long ago you last did something (e.g. '2 min ago')\n"
+        "3. Anything pending for Scott? (unread messages, waiting tasks, or 'All clear')\n"
+        "4. Next scheduled task and when (e.g. 'Morning briefing at 6:30am')\n"
+        "No technical jargon. No token counts. Plain language only.",
         reply, sizeof(reply));
     uint32_t ping_ms = millis() - t0;
     if (ok && reply[0]) {
         char info[600];
         snprintf(info, sizeof(info),
-                 "Host: reachable (%lums)\n\n%s",
-                 (unsigned long)ping_ms, reply);
+                 "%s\n\nPing: %lums",
+                 reply, (unsigned long)ping_ms);
         setLastResponse(info);
         setState(STATE_RESPONSE);
         ui_showResponse(info);
@@ -345,6 +351,48 @@ static void doScreenTest() {
     touchInteraction();
 }
 
+static void doOtaUpdate() {
+    Serial.println("[ui] OTA update check (deferred)");
+    if (!net_isConnected()) {
+        ui_showError("No WiFi");
+        return;
+    }
+    ui_showSending();
+    lv_refr_now(NULL);
+
+    int remote = net_checkFirmwareVersion();
+    if (remote < 0) {
+        ui_showError("Update check failed");
+        touchInteraction();
+        return;
+    }
+    if (remote <= FIRMWARE_VERSION) {
+        char info[128];
+        snprintf(info, sizeof(info),
+                 "Up to date (%s)\nNo update available.", FIRMWARE_VERSION_STR);
+        ui_showError(info);
+        touchInteraction();
+        return;
+    }
+
+    // Update available — show and proceed
+    char info[128];
+    snprintf(info, sizeof(info),
+             "Update: %s -> v%d\nInstalling...", FIRMWARE_VERSION_STR, remote);
+    setLastResponse(info);
+    setState(STATE_RESPONSE);
+    ui_showResponse(info);
+    lv_refr_now(NULL);
+
+    char err[128];
+    if (!net_doOtaUpdate(err, sizeof(err))) {
+        char msg[256];
+        snprintf(msg, sizeof(msg), "Update failed:\n%s", err);
+        ui_showError(msg);
+    }
+    touchInteraction();
+}
+
 static void runPendingAction() {
     PendingAction action = g_pendingAction;
     if (action == ACTION_NONE) return;
@@ -354,6 +402,7 @@ static void runPendingAction() {
         case ACTION_FIND_PHONE:       doFindPhone();      break;
         case ACTION_NANOCLAW_STATUS:  doNanoclawStatus(); break;
         case ACTION_SCREEN_TEST:      doScreenTest();     break;
+        case ACTION_OTA_UPDATE:       doOtaUpdate();      break;
         default: break;
     }
 }

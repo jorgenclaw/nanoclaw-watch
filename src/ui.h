@@ -117,6 +117,9 @@ void ui_showBatteryDetail();
 // credential. Inaction or tapping a different row cancels the arm.
 void ui_showWifiManager();
 
+// IR remote control screen (Roku d-pad layout)
+void ui_showIrRemote();
+
 // Callbacks fired by UI buttons. Defined in main.cpp.
 extern void onSpeakButtonPressed();
 extern void onQuickPromptPressed(int idx);   // idx = 0..3

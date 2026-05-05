@@ -4,6 +4,7 @@
 #include "network.h"
 #include "settings.h"
 #include "gps.h"
+#include "ir_remote.h"
 
 #include <LilyGoLib.h>
 #include <LV_Helper.h>
@@ -145,13 +146,13 @@ static const char* GRID_LABELS[GRID_COUNT] = {
     "Remind",          // 2 — voice-triggered scheduled reminder
     "Clock",           // 3 — clock sub-screen (alarm/timer/stopwatch/pomodoro)
     "Inbox",           // 4 — unread email summary (pushed by Jorgenclaw)
-    "Next Event",      // 5 — next calendar event (once protond works)
+    "Remote",          // 5 — IR remote for Roku TV
     "WiFi",            // 6 — saved networks manager (list + tap-to-forget)
     "Status",          // 7 — NanoClaw host status (reachable, uptime)
     "DND",             // 8 — Do Not Disturb (submenu for time selection)
     "Find Phone",      // 9 — ping Scott's phone via Jorgenclaw
     "Flashlight",      // 10 — white -> tap -> red -> tap -> home
-    "Screen Test",     // 11 — RGB cycle for display health check (stub)
+    "Update",          // 11 — OTA firmware update check
 };
 
 // --- Event callbacks ---
@@ -2542,4 +2543,100 @@ void ui_tick() {
     // Expire any armed WiFi-forget row after 3 sec so the red state doesn't
     // linger visually.
     wifi_mgr_tick();
+}
+
+// =============================================================================
+// IR Remote — Vizio V505-G9 (NEC 0x20DF series, 38kHz)
+// =============================================================================
+
+static lv_obj_t* ir_screen = NULL;
+
+static void ir_btn_cb(lv_event_t* e) {
+    uint32_t code = (uint32_t)(uintptr_t)lv_event_get_user_data(e);
+    ir_sendNEC(code);
+    instance.vibrator();
+    touchInteraction();
+}
+
+static lv_obj_t* ir_make_btn(lv_obj_t* parent, const char* label,
+                              int x, int y, int w, int h, uint32_t code) {
+    lv_obj_t* btn = lv_button_create(parent);
+    lv_obj_set_size(btn, w, h);
+    lv_obj_set_pos(btn, x, y);
+    lv_obj_set_style_bg_color(btn, lv_color_hex(0x334155), 0);
+    lv_obj_set_style_radius(btn, 8, 0);
+    lv_obj_add_event_cb(btn, ir_btn_cb, LV_EVENT_CLICKED,
+                        (void*)(uintptr_t)code);
+    lv_obj_t* lbl = lv_label_create(btn);
+    lv_obj_set_style_text_font(lbl, &lv_font_montserrat_14, 0);
+    lv_obj_set_style_text_color(lbl, lv_color_hex(0xE2E8F0), 0);
+    lv_label_set_text(lbl, label);
+    lv_obj_center(lbl);
+    return btn;
+}
+
+void ui_showIrRemote() {
+    if (ir_screen) { lv_screen_load(ir_screen); return; }
+
+    ir_screen = lv_obj_create(NULL);
+    lv_obj_set_style_bg_color(ir_screen, lv_color_hex(0x0F172A), 0);
+    lv_obj_clear_flag(ir_screen, LV_OBJ_FLAG_SCROLLABLE);
+
+    // Title
+    lv_obj_t* title = lv_label_create(ir_screen);
+    lv_obj_set_style_text_font(title, &lv_font_montserrat_14, 0);
+    lv_obj_set_style_text_color(title, lv_color_hex(0x94A3B8), 0);
+    lv_label_set_text(title, "Vizio Remote");
+    lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 4);
+
+    // bh=30 keeps all 6 rows inside the 240px screen height (bottom edge at 232)
+    int bw = 68, bh = 30;
+    int col0 = 6, col1 = 86, col2 = 166;
+
+    // Row 0: Power, Input, Home  (y=22)
+    ir_make_btn(ir_screen, LV_SYMBOL_POWER,   col0, 22, bw, bh, TV_POWER);
+    ir_make_btn(ir_screen, "Input",            col1, 22, bw, bh, TV_INPUT);
+    ir_make_btn(ir_screen, LV_SYMBOL_HOME,     col2, 22, bw, bh, TV_HOME);
+
+    // Row 1: Back, Up, Menu  (y=58)
+    ir_make_btn(ir_screen, "Back",             col0, 58, bw, bh, TV_BACK);
+    ir_make_btn(ir_screen, LV_SYMBOL_UP,       col1, 58, bw, bh, TV_UP);
+    ir_make_btn(ir_screen, "Menu",             col2, 58, bw, bh, TV_MENU);
+
+    // Row 2: Left, OK, Right  (y=94)
+    ir_make_btn(ir_screen, LV_SYMBOL_LEFT,     col0, 94, bw, bh, TV_LEFT);
+    ir_make_btn(ir_screen, "OK",               col1, 94, bw, bh, TV_OK);
+    ir_make_btn(ir_screen, LV_SYMBOL_RIGHT,    col2, 94, bw, bh, TV_RIGHT);
+
+    // Row 3: Ch-, Down, Ch+  (y=130)
+    ir_make_btn(ir_screen, "Ch -",             col0, 130, bw, bh, TV_CH_DOWN);
+    ir_make_btn(ir_screen, LV_SYMBOL_DOWN,     col1, 130, bw, bh, TV_DOWN);
+    ir_make_btn(ir_screen, "Ch +",             col2, 130, bw, bh, TV_CH_UP);
+
+    // Row 4: Vol-, Play, Vol+  (y=166)
+    ir_make_btn(ir_screen, "Vol -",            col0, 166, bw, bh, TV_VOL_DOWN);
+    ir_make_btn(ir_screen, LV_SYMBOL_PLAY,     col1, 166, bw, bh, TV_PLAY);
+    ir_make_btn(ir_screen, "Vol +",            col2, 166, bw, bh, TV_VOL_UP);
+
+    // Row 5: Mute, (empty), Watch  (y=202, bottom=232)
+    ir_make_btn(ir_screen, LV_SYMBOL_MUTE,     col0, 202, bw, bh, TV_MUTE);
+
+    // Watch Home button — returns to watch home screen (distinct from TV Home)
+    lv_obj_t* close = lv_button_create(ir_screen);
+    lv_obj_set_size(close, bw, bh);
+    lv_obj_set_pos(close, col2, 202);
+    lv_obj_set_style_bg_color(close, lv_color_hex(0x1E3A5F), 0);
+    lv_obj_set_style_radius(close, 8, 0);
+    lv_obj_add_event_cb(close, [](lv_event_t*) {
+        setState(STATE_HOME);
+        ui_showHome();
+        touchInteraction();
+    }, LV_EVENT_CLICKED, NULL);
+    lv_obj_t* clbl = lv_label_create(close);
+    lv_obj_set_style_text_font(clbl, &lv_font_montserrat_14, 0);
+    lv_obj_set_style_text_color(clbl, lv_color_hex(0x93C5FD), 0);
+    lv_label_set_text(clbl, "Watch");
+    lv_obj_center(clbl);
+
+    lv_screen_load(ir_screen);
 }

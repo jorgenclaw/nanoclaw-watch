@@ -21,6 +21,7 @@ enum WatchState {
     STATE_POMODORO,    // Pomodoro timer (work/rest cycles)
     STATE_WIFI_MANAGER,// saved-networks list with tap-to-forget
     STATE_PORTAL,      // WiFi captive portal running (main loop pumps wm.process())
+    STATE_IR_REMOTE,   // IR remote control (Roku d-pad + vol/power)
     STATE_ERROR        // generic error display
 };
 

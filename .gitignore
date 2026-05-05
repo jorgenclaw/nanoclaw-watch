@@ -17,3 +17,6 @@ Thumbs.db
 
 # Transient resume notes
 PICKUP.md
+
+# OTA firmware staging (built artifacts, served by host)
+data/

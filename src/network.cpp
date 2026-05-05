@@ -372,6 +372,7 @@ bool net_postText(const char* prompt, char* reply_buf, size_t reply_buf_size) {
     http.begin(url);
     http.addHeader("Content-Type", "application/json");
     http.addHeader("X-Watch-Token", WATCH_AUTH_TOKEN);
+    http.addHeader("X-Device-Id", WATCH_DEVICE_ID);
     http.setTimeout(HTTP_TIMEOUT_MS);
 
     StaticJsonDocument<512> req;
@@ -689,4 +690,93 @@ int net_pollNotifications(const char* since_iso,
         Serial.printf("[notif] received %d notification(s)\n", count);
     }
     return count;
+}
+
+// =============================================================================
+// OTA Firmware Update
+// =============================================================================
+
+#include <Update.h>
+
+int net_checkFirmwareVersion() {
+    if (!net_isConnected()) return -1;
+
+    HTTPClient http;
+    String url = String(NANOCLAW_HOST_URL) + "/api/watch/version";
+    http.begin(url);
+    http.addHeader("X-Watch-Token", WATCH_AUTH_TOKEN);
+    http.setTimeout(10000);
+
+    int code = http.GET();
+    int remoteVersion = -1;
+    if (code == 200) {
+        String resp = http.getString();
+        StaticJsonDocument<256> doc;
+        if (deserializeJson(doc, resp) == DeserializationError::Ok) {
+            remoteVersion = doc["version"] | -1;
+        }
+    }
+    http.end();
+    Serial.printf("[ota] version check: local=%d remote=%d\n",
+                  FIRMWARE_VERSION, remoteVersion);
+    return remoteVersion;
+}
+
+bool net_doOtaUpdate(char* err_buf, size_t err_buf_size) {
+    if (!net_isConnected()) {
+        strncpy(err_buf, "No WiFi", err_buf_size - 1);
+        return false;
+    }
+
+    HTTPClient http;
+    String url = String(NANOCLAW_HOST_URL) + "/api/watch/firmware";
+    http.begin(url);
+    http.addHeader("X-Watch-Token", WATCH_AUTH_TOKEN);
+    http.addHeader("X-Device-Id", WATCH_DEVICE_ID);
+    http.setTimeout(60000);
+
+    int code = http.GET();
+    if (code != 200) {
+        snprintf(err_buf, err_buf_size, "HTTP %d", code);
+        http.end();
+        return false;
+    }
+
+    int contentLength = http.getSize();
+    if (contentLength <= 0) {
+        strncpy(err_buf, "No firmware data", err_buf_size - 1);
+        http.end();
+        return false;
+    }
+
+    if (!Update.begin(contentLength)) {
+        snprintf(err_buf, err_buf_size, "OTA begin fail: %s",
+                 Update.errorString());
+        http.end();
+        return false;
+    }
+
+    WiFiClient* stream = http.getStreamPtr();
+    size_t written = Update.writeStream(*stream);
+    Serial.printf("[ota] wrote %u / %d bytes\n",
+                  (unsigned)written, contentLength);
+
+    if (!Update.end()) {
+        snprintf(err_buf, err_buf_size, "OTA end fail: %s",
+                 Update.errorString());
+        http.end();
+        return false;
+    }
+
+    if (!Update.isFinished()) {
+        strncpy(err_buf, "OTA not finished", err_buf_size - 1);
+        http.end();
+        return false;
+    }
+
+    http.end();
+    Serial.println("[ota] update complete, rebooting...");
+    delay(500);
+    ESP.restart();
+    return true; // never reached
 }

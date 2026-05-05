@@ -60,6 +60,16 @@ bool net_pollForResponse(char* reply_buf, size_t reply_buf_size);
 // NTP time sync (call after WiFi connects)
 void net_syncTime();
 
+// --- OTA firmware update ---
+// Check if a newer firmware version is available on the host.
+// Returns the remote version number (> FIRMWARE_VERSION means update available),
+// or -1 on error.
+int net_checkFirmwareVersion();
+
+// Download and install firmware from the host via OTA. Reboots on success.
+// Returns false on failure (writes error to err_buf).
+bool net_doOtaUpdate(char* err_buf, size_t err_buf_size);
+
 // Weather data fetched from wttr.in. All values populated together by
 // net_fetchWeather() — both imperial and metric so unit toggles don't
 // require a refetch. Strings are short and null-terminated.

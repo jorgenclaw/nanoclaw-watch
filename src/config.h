@@ -5,6 +5,10 @@
 // Edit these constants before flashing. Everything user-tunable lives here.
 // =============================================================================
 
+// --- Firmware version (bump on each release) ---
+#define FIRMWARE_VERSION  15
+#define FIRMWARE_VERSION_STR "v15"
+
 // --- WiFi provisioning ---
 // WiFi credentials are stored in NVS (persist across reflashes) and
 // configured via a captive portal on first boot or on demand. No need

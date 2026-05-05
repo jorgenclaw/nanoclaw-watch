@@ -6,8 +6,8 @@
 // =============================================================================
 
 // --- Firmware version (bump on each release) ---
-#define FIRMWARE_VERSION  15
-#define FIRMWARE_VERSION_STR "v15"
+#define FIRMWARE_VERSION  16
+#define FIRMWARE_VERSION_STR "v16"
 
 // --- WiFi provisioning ---
 // WiFi credentials are stored in NVS (persist across reflashes) and
@@ -24,11 +24,26 @@
 #define WIFI_CONNECT_TIMEOUT_SEC  15   // seconds before falling back to portal
 
 // --- NanoClaw host endpoint ---
-// Base URL of your NanoClaw host. Watch will POST to:
-//   <NANOCLAW_HOST_URL>/api/watch/message  (text or audio submissions)
-//   <NANOCLAW_HOST_URL>/api/watch/poll     (incoming response polling)
-// TODO: Set to your host's LAN IP and port
-#define NANOCLAW_HOST_URL    "http://192.168.9.184:3000"
+//
+// The watch finds your NanoClaw host on the LAN via mDNS. Your host advertises
+// `<NANOCLAW_HOSTNAME>.local` (most Linux desktop distros do this automatically
+// once the hostname is set; on Pop!_OS / Ubuntu / Fedora that's
+// `sudo hostnamectl set-hostname nanoclaw`). The watch resolves the hostname
+// at boot and on reconnects, so the host can change IPs (DHCP, router swap,
+// network move) without a re-flash.
+//
+// If your router blocks mDNS multicast (rare on home networks, common on guest
+// WiFi or enterprise gear), the watch falls back to NANOCLAW_FALLBACK_IP. Set
+// that to your host's last-known IP — the watch only uses it after both mDNS
+// and DNS resolution fail.
+//
+// Watch will POST to:
+//   http://<resolved>:<NANOCLAW_HOST_PORT>/api/watch/message
+//   http://<resolved>:<NANOCLAW_HOST_PORT>/api/watch/poll
+#define NANOCLAW_HOSTNAME     "nanoclaw"          // mDNS lookup target (without .local)
+#define NANOCLAW_HOST_PORT    3000
+#define NANOCLAW_FALLBACK_IP  "192.168.9.184"     // Last-resort literal; set to your
+                                                   // host's static/last-known IP
 
 // Shared secret to authenticate the watch to the host. Generate one and store
 // it in your NanoClaw config too. (Until /api/watch/* exists, this is unused.)

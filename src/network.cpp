@@ -1,6 +1,7 @@
 #include "network.h"
 #include "config.h"
 #include "settings.h"
+#include "nanoclaw_host.h"
 
 #include <WiFi.h>
 #include <WiFiMulti.h>
@@ -196,6 +197,9 @@ void net_begin() {
 
     if (WiFi.status() == WL_CONNECTED) {
         Serial.printf("[net] connected to %s\n", WiFi.SSID().c_str());
+        // Bring up our mDNS responder + prime the host resolver. Idempotent.
+        // Must happen after WL_CONNECTED so we have an IP to bind on.
+        NanoclawHost::begin();
     } else {
         // No saved networks, or none in range — open the config portal.
         Serial.println("[net] no saved network available — opening portal");
@@ -368,7 +372,12 @@ bool net_postText(const char* prompt, char* reply_buf, size_t reply_buf_size) {
     }
 
     HTTPClient http;
-    String url = String(NANOCLAW_HOST_URL) + "/api/watch/message";
+    String base = NanoclawHost::baseURL();
+    if (base.length() <= 7) {
+        Serial.println("[net] message: host unresolved (mDNS+DNS+fallback all failed)");
+        return false;
+    }
+    String url = base + "/api/watch/message";
     http.begin(url);
     http.addHeader("Content-Type", "application/json");
     http.addHeader("X-Watch-Token", WATCH_AUTH_TOKEN);
@@ -413,7 +422,13 @@ static bool postAudioTo(const char* path,
     }
 
     HTTPClient http;
-    String url = String(NANOCLAW_HOST_URL) + path;
+    String base = NanoclawHost::baseURL();
+    if (base.length() <= 7) {
+        Serial.println("[net] audio: host unresolved (mDNS+DNS+fallback all failed)");
+        strncpy(reply_buf, "Host unreachable", reply_buf_size - 1);
+        return false;
+    }
+    String url = base + path;
     http.begin(url);
     http.addHeader("Content-Type", "audio/wav");
     http.addHeader("X-Watch-Token", WATCH_AUTH_TOKEN);
@@ -457,7 +472,13 @@ bool net_pollForResponse(char* reply_buf, size_t reply_buf_size) {
     if (!net_isConnected()) return false;
 
     HTTPClient http;
-    String url = String(NANOCLAW_HOST_URL) + "/api/watch/poll?device_id=" WATCH_DEVICE_ID;
+    String base = NanoclawHost::baseURL();
+    if (base.length() <= 7) {
+        // Don't spam this on every poll — it'd flood the serial log when the
+        // host is genuinely down. Only log on cache-miss-and-failure transitions.
+        return false;
+    }
+    String url = base + "/api/watch/poll?device_id=" WATCH_DEVICE_ID;
     http.begin(url);
     http.addHeader("X-Watch-Token", WATCH_AUTH_TOKEN);
     http.setTimeout(HTTP_TIMEOUT_MS);
@@ -644,7 +665,9 @@ int net_pollNotifications(const char* since_iso,
                           WatchNotification* out, int max_count) {
     if (!net_isConnected()) return 0;
 
-    String url = String(NANOCLAW_HOST_URL)
+    String base = NanoclawHost::baseURL();
+    if (base.length() <= 7) return 0;
+    String url = base
         + "/api/watch/notifications?since="
         + String(since_iso);
 
@@ -702,7 +725,12 @@ int net_checkFirmwareVersion() {
     if (!net_isConnected()) return -1;
 
     HTTPClient http;
-    String url = String(NANOCLAW_HOST_URL) + "/api/watch/version";
+    String base = NanoclawHost::baseURL();
+    if (base.length() <= 7) {
+        Serial.println("[ota] version: host unresolved");
+        return -1;
+    }
+    String url = base + "/api/watch/version";
     http.begin(url);
     http.addHeader("X-Watch-Token", WATCH_AUTH_TOKEN);
     http.setTimeout(10000);
@@ -729,7 +757,12 @@ bool net_doOtaUpdate(char* err_buf, size_t err_buf_size) {
     }
 
     HTTPClient http;
-    String url = String(NANOCLAW_HOST_URL) + "/api/watch/firmware";
+    String base = NanoclawHost::baseURL();
+    if (base.length() <= 7) {
+        strncpy(err_buf, "Host unresolved", err_buf_size - 1);
+        return false;
+    }
+    String url = base + "/api/watch/firmware";
     http.begin(url);
     http.addHeader("X-Watch-Token", WATCH_AUTH_TOKEN);
     http.addHeader("X-Device-Id", WATCH_DEVICE_ID);
